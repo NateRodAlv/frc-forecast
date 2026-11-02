@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FRC Forecast</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/">FRC<span>Forecast</span></a>
+  <nav>
+    <a href="#/" data-nav="rankings">Rankings</a>
+    <a href="#/events" data-nav="events">Events</a>
+    <a href="#/advancement" data-nav="advancement">Advancement</a>
+    <a href="#/predict" data-nav="predict">Match predictor</a>
+    <a href="#/model" data-nav="model">Model</a>
+  </nav>
+  <input id="search" type="search" placeholder="Team # or name" autocomplete="off" aria-label="Search teams">
+</header>
+<div id="banner" class="banner" hidden></div>
+<main id="app" aria-live="polite"><p class="muted">Loading…</p></main>
+<footer>Unofficial. Data from The Blue Alliance. Probabilities are model estimates, not guarantees.
+  <span id="gen"></span></footer>
+<script src="app.js"></script>
+</body>
+</html>
