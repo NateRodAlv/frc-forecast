@@ -47,14 +47,23 @@ def load_real(start, target, log):
         for e in evs:
             data["events"].append(e)
             future = e["start"] > today
-            if e["type"] in (0, 1, 2, 5, 99) and not future:
-                ms = api.event_matches(e["key"])
-                data["matches"][e["key"]] = ms
-                data["event_teams"][e["key"]] = sorted({t for m in ms for t in m["red"] + m["blue"]}) or api.event_teams(e["key"])
-            elif e["type"] in (0, 1, 2, 5, 99):
-                # future (or in-progress-not-started) event: roster + published schedule, if any
-                data["event_teams"][e["key"]] = api.event_teams(e["key"])
-                data["matches"][e["key"]] = api.event_matches(e["key"])
+            if e["type"] not in (0, 1, 2, 5, 99):
+                continue
+            try:
+                if not future:
+                    ms = api.event_matches(e["key"])
+                    data["matches"][e["key"]] = ms
+                    data["event_teams"][e["key"]] = sorted({t for m in ms for t in m["red"] + m["blue"]}) or api.event_teams(e["key"])
+                else:
+                    # future event: roster + published schedule, if any
+                    data["event_teams"][e["key"]] = api.event_teams(e["key"])
+                    data["matches"][e["key"]] = api.event_matches(e["key"])
+            except RuntimeError:
+                raise                                   # bad API key etc: stop loudly
+            except Exception as ex:                     # one flaky event shouldn't kill the whole refresh
+                log(f"  skipped {e['key']}: {type(ex).__name__}")
+                data["matches"].pop(e["key"], None)
+                data["event_teams"].pop(e["key"], None)
     for y in (target, target - 1):
         try:
             team_info.update(api.teams_year(y))

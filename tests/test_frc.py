@@ -110,3 +110,24 @@ def test_tba_suffixed_offseason_team_keys(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "get", lambda p, retries=3: fake.get(p))
     assert [m["key"] for m in api.event_matches("e")] == ["e_qm2"]
     assert api.event_teams("e") == [1, 2]
+
+
+def test_tba_retries_dropped_connections(monkeypatch, tmp_path):
+    import requests
+    from frc import tba as tbamod
+    monkeypatch.setattr(tbamod, "CACHE", tmp_path)
+    monkeypatch.setattr(tbamod.time, "sleep", lambda s: None)
+    api = tbamod.TBA(key="x")
+    calls = {"n": 0}
+
+    class R:
+        status_code, headers, text = 200, {}, "[1]"
+        def json(self): return [1]
+
+    def flaky(url, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise requests.ConnectionError("Remote end closed connection")
+        return R()
+    monkeypatch.setattr(api.s, "get", flaky)
+    assert api.get("/x") == [1] and calls["n"] == 3

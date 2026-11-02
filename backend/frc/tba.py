@@ -43,8 +43,14 @@ class TBA:
         headers = {}
         if body_f.exists() and etag_f.exists():
             headers["If-None-Match"] = etag_f.read_text()
-        for i in range(retries):
-            r = self.s.get(BASE + path, headers=headers, timeout=30)
+        last = None
+        for i in range(max(retries, 6)):
+            try:
+                r = self.s.get(BASE + path, headers=headers, timeout=30)
+            except (requests.ConnectionError, requests.Timeout) as ex:   # dropped connection, DNS, timeout
+                last = ex
+                time.sleep(min(30, 2 ** i))
+                continue
             if r.status_code == 304 and body_f.exists():
                 return json.loads(body_f.read_text())
             if r.status_code == 200:
@@ -54,8 +60,11 @@ class TBA:
                 return r.json()
             if r.status_code == 404:
                 return None
-            time.sleep(2 ** i)
-        r.raise_for_status()
+            if r.status_code in (401, 403):
+                raise RuntimeError(f"TBA rejected the request ({r.status_code}): check the TBA_KEY secret")
+            last = RuntimeError(f"HTTP {r.status_code} for {path}")
+            time.sleep(min(30, 2 ** i))
+        raise last
 
     # ---- convenience wrappers returning slim dicts ----
     def events(self, year):
