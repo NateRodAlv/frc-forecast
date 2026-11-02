@@ -112,18 +112,24 @@ class Sim:
 
     # ------------------------------------------------------------------ one event
     def schedule(self, n):
+        """Random balanced qualification schedule: every team plays ~mpt matches, 6 distinct teams per match."""
+        if n < 6:
+            raise ValueError("need at least 6 teams")
         rng = self.rng
         nm = math.ceil(n * self.mpt / 6)
-        flat = []
-        while len(flat) < nm * 6:
-            flat += list(rng.permutation(n))
-        out, i = [], 0
+        flat, i, out = [], 0, []
         for _ in range(nm):
             chunk = []
+            guard = 0
             while len(chunk) < 6:
-                t = int(flat[i]); i += 1
+                if i >= len(flat):
+                    flat.extend(int(x) for x in rng.permutation(n))
+                t = flat[i]; i += 1
                 if t not in chunk:
                     chunk.append(t)
+                guard += 1
+                if guard > 200:      # cannot happen for n >= 6, but never loop forever
+                    chunk = [int(x) for x in rng.choice(n, 6, replace=False)]
             out.append((chunk[:3], chunk[3:]))
         return out
 

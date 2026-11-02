@@ -131,3 +131,13 @@ def test_tba_retries_dropped_connections(monkeypatch, tmp_path):
         return R()
     monkeypatch.setattr(api.s, "get", flaky)
     assert api.get("/x") == [1] and calls["n"] == 3
+
+
+def test_schedule_all_event_sizes():
+    rules = json.loads((ROOT / "config/rules.json").read_text())
+    sim = simulate.Sim(rules, beta=1.0, nsims=10, seed=3)
+    for n in list(range(6, 110)) + [150]:
+        sch = sim.schedule(n)
+        assert all(len(set(r + b)) == 6 for r, b in sch)
+        counts = np.bincount([t for r, b in sch for t in r + b], minlength=n)
+        assert counts.min() >= 1 and counts.max() <= sim.mpt + 2
