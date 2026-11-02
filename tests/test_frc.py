@@ -95,3 +95,18 @@ def test_tba_parsing_with_schema_shaped_fixtures(monkeypatch, tmp_path):
     m = api.event_matches("2027chcmp")[0]
     assert m["rs"] is None and m["bs"] == 70 and m["red"] == [1, 2, 3]
     assert api.teams_year(2027)[1]["rookie_year"] == 2000
+
+
+def test_tba_suffixed_offseason_team_keys(monkeypatch, tmp_path):
+    from frc import tba as tbamod
+    monkeypatch.setattr(tbamod, "CACHE", tmp_path)
+    api = tbamod.TBA(key="x")
+    ok = {"team_keys": ["frc1", "frc2", "frc3"], "score": 10}
+    bad = {"team_keys": ["frc4B", "frc5", "frc6"], "score": 20}
+    fake = {"/event/e/matches/simple": [
+        {"key": "e_qm1", "comp_level": "qm", "set_number": 1, "match_number": 1, "alliances": {"red": ok, "blue": bad}},
+        {"key": "e_qm2", "comp_level": "qm", "set_number": 1, "match_number": 2, "alliances": {"red": ok, "blue": {"team_keys": ["frc7", "frc8", "frc9"], "score": 5}}}],
+        "/event/e/teams/keys": ["frc1", "frc254B", "frc2"]}
+    monkeypatch.setattr(api, "get", lambda p, retries=3: fake.get(p))
+    assert [m["key"] for m in api.event_matches("e")] == ["e_qm2"]
+    assert api.event_teams("e") == [1, 2]

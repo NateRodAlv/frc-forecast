@@ -22,6 +22,12 @@ EVENT_TYPES = {
 }
 
 
+def tnum(key):
+    """'frc254' -> 254. Offseason-only duplicate teams have suffixed keys ('frc254B'): return None."""
+    k = key[3:]
+    return int(k) if k.isdigit() else None
+
+
 class TBA:
     def __init__(self, key=None, user_agent="frc-forecast (github pages model)"):
         self.key = key or os.environ.get("TBA_KEY")
@@ -67,17 +73,20 @@ class TBA:
         return out
 
     def event_teams(self, ev_key):
-        return [int(t[3:]) for t in (self.get(f"/event/{ev_key}/teams/keys") or [])]
+        return [n for n in (tnum(t) for t in (self.get(f"/event/{ev_key}/teams/keys") or [])) if n is not None]
 
     def event_matches(self, ev_key):
         out = []
         for m in self.get(f"/event/{ev_key}/matches/simple") or []:
             red, blue = m["alliances"]["red"], m["alliances"]["blue"]
+            rt = [tnum(t) for t in red["team_keys"]]
+            bt = [tnum(t) for t in blue["team_keys"]]
+            if None in rt or None in bt or len(rt) < 3 or len(bt) < 3:
+                continue   # skip matches involving suffixed offseason teams / malformed rows
             out.append({
                 "key": m["key"], "lvl": m["comp_level"], "set": m["set_number"],
                 "num": m["match_number"], "time": m.get("predicted_time") or m.get("time"),
-                "red": [int(t[3:]) for t in red["team_keys"]],
-                "blue": [int(t[3:]) for t in blue["team_keys"]],
+                "red": rt, "blue": bt,
                 "rs": red["score"] if red["score"] is not None and red["score"] >= 0 else None,
                 "bs": blue["score"] if blue["score"] is not None and blue["score"] >= 0 else None,
             })
@@ -85,11 +94,11 @@ class TBA:
 
     def event_alliances(self, ev_key):
         a = self.get(f"/event/{ev_key}/alliances") or []
-        return [[int(t[3:]) for t in x["picks"]] for x in a]
+        return [[n for n in (tnum(t) for t in x["picks"]) if n is not None] for x in a]
 
     def event_awards(self, ev_key):
         return [{"type": a["award_type"], "name": a["name"],
-                 "teams": [int(r["team_key"][3:]) for r in a["recipient_list"] if r.get("team_key")]}
+                 "teams": [n for n in (tnum(r["team_key"]) for r in a["recipient_list"] if r.get("team_key")) if n is not None]}
                 for a in (self.get(f"/event/{ev_key}/awards") or [])]
 
     def teams_year(self, year):
