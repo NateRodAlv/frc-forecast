@@ -141,3 +141,14 @@ def test_schedule_all_event_sizes():
         assert all(len(set(r + b)) == 6 for r, b in sch)
         counts = np.bincount([t for r, b in sch for t in r + b], minlength=n)
         assert counts.min() >= 1 and counts.max() <= sim.mpt + 2
+
+
+def test_small_events_are_skipped_not_crashed():
+    rules = json.loads((ROOT / "config/rules.json").read_text())
+    rules["districts"]["syn"] = {"name": "s", "cmp_slots": 5, "dcmp_capacity": 30, "impact": 1, "ei": 1, "ras": 1, "aliases": ["syn"]}
+    evs = [{"key": f"e{i}", "year": 2027, "name": "x", "type": 1, "type_name": "district", "district": "syn",
+            "start": f"2027-03-{i+1:02d}", "country": "USA"} for i in range(3)]
+    teams = {"e0": list(range(1, 21)), "e1": list(range(10, 60)), "e2": list(range(100, 117))}   # 20, 50, 17 teams
+    st = {t: (0.0, 0.8) for v in teams.values() for t in v}
+    out = simulate.run_season(simulate.Sim(rules, 1.0, nsims=30), 2027, evs, teams, st, {}, log=lambda *_: None)
+    assert set(out["events"]) == {"e1"} and sorted(out["skipped_small_events"]) == ["e0", "e2"]

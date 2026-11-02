@@ -179,6 +179,8 @@ def main():
     if season["unmatched_districts"]:
         warnings.append("District abbreviations not in config/rules.json (excluded from advancement odds): "
                         + ", ".join(season["unmatched_districts"]))
+    if season.get("skipped_small_events"):
+        warnings.append(f"{len(season['skipped_small_events'])} events with fewer than 24 teams were not simulated.")
     if not tevents:
         warnings.append(f"No {a.target_year} events on TBA yet.")
     if n_prior:

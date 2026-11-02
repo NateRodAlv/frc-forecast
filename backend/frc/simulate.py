@@ -22,6 +22,7 @@ from scipy.special import erfinv
 
 QUAL_ALPHA = 1.07
 BONUS_A, BONUS_B, N_BONUS = -0.3, 0.5, 2       # placeholder bonus-RP model (game specific)
+MIN_TEAMS = 24
 SIG = lambda x: 1.0 / (1.0 + np.exp(-x))
 
 
@@ -229,11 +230,16 @@ def run_season(sim, year, events, event_teams, strengths, rookie_years, schedule
     awards_dist = rules["district_points"]["awards"]
     awards_reg = rules["regional_points"]["awards"]
 
+    skipped = []
     out_events, team_pts = {}, defaultdict(list)   # team -> [(start, key, pts(m,), type, district, country)]
     impact_win = {}
     for e in sorted(events, key=lambda e: (e["start"], e["key"])):
         teams = event_teams.get(e["key"], [])
-        if e["type"] not in (0, 1, 99) or len(teams) < 16:
+        if e["type"] not in (0, 1, 99):
+            continue
+        if len(teams) < MIN_TEAMS:       # 8 captains + 16 picks need 24 teams; smaller events aren't simulated
+            if teams:
+                skipped.append(e["key"])
             continue
         idx = [tid[t] for t in teams]
         sch = None
@@ -300,7 +306,7 @@ def run_season(sim, year, events, event_teams, strengths, rookie_years, schedule
         gidx = np.array([tid[t] for t in dteams])
         for s in range(m):
             Q = np.where(qdcmp[:, s])[0]
-            if len(Q) < 16:
+            if len(Q) < MIN_TEAMS:
                 continue
             Sg = S[gidx[Q], s]
             pts, winners, order = sim.mini_event(np.arange(len(Q)), Sg)
@@ -325,7 +331,7 @@ def run_season(sim, year, events, event_teams, strengths, rookie_years, schedule
                                   "expected_dcmp_teams": round(float(qdcmp.sum(0).mean()), 1),
                                   "expected_cmp_teams": round(float(qcmp.sum(0).mean()), 1)}
     # ------------------ regional model
-    regs = sorted([e for e in events if e["type"] == 0 and len(event_teams.get(e["key"], [])) >= 16],
+    regs = sorted([e for e in events if e["type"] == 0 and len(event_teams.get(e["key"], [])) >= MIN_TEAMS],
                   key=lambda e: (e["start"], e["key"]))
     if regs:
         rt = sorted({t for e in regs for t in event_teams[e["key"]]})
@@ -363,7 +369,7 @@ def run_season(sim, year, events, event_teams, strengths, rookie_years, schedule
         districts_out["_regional"] = {"name": "Regional model", "teams": len(rt), "direct_slots": n_direct,
                                       "pool_slots": pool_slots}
     return {"events": out_events, "teams": {int(k): v for k, v in team_out.items()},
-            "districts": districts_out, "unmatched_districts": sorted(unmatched)}
+            "districts": districts_out, "unmatched_districts": sorted(unmatched), "skipped_small_events": skipped}
 
 
 # ---------------------------------------------------------------------- match predictions
