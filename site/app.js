@@ -75,26 +75,61 @@ function viewRankings() {
   draw();
 }
 
+const ordinal = (n) => { n = Math.round(n); const s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
+
 function trajectoryChart(t) {
-  const hist = t.forecast.history || [], f = t.forecast, W = 520, H = 190, P = 28;
+  const f = t.forecast, W = 560, H = 215, P = 30;
+  // hist rows: [year, rating (sd above season average), percentile, matches, raw model rating | null]
+  const hist = t.hist && t.hist.length ? t.hist : (f.history || []).map((x) => [x[0], x[1], null, null, null]);
   const yrs = hist.map((x) => x[0]).concat([S.meta.target_year]);
   const vals = hist.map((x) => x[1]).concat([f.q10 ?? f.mean - f.sd, f.q90 ?? f.mean + f.sd, f.mean]);
   const lo = Math.min(-2, ...vals) - 0.2, hi = Math.max(2, ...vals) + 0.2;
   const x = (i) => P + (i * (W - 2 * P)) / Math.max(1, yrs.length - 1), y = (v) => H - P - ((v - lo) / (hi - lo)) * (H - 2 * P);
-  const g = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Strength history and forecast" });
+  const g = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Season rating history and forecast" });
   g.append(svg("line", { x1: P, x2: W - P, y1: y(0), y2: y(0), stroke: "var(--line)" }));
+  g.append(svg("text", { x: 4, y: y(0) + 4 }, "avg"));
   hist.forEach((p, i) => g.append(svg("text", { x: x(i), y: H - 8, "text-anchor": "middle" }, p[0])));
   g.append(svg("text", { x: x(yrs.length - 1), y: H - 8, "text-anchor": "middle" }, S.meta.target_year + " (fc)"));
   if (hist.length) {
-    const pts = hist.map((p, i) => `${x(i)},${y(p[1])}`).join(" ");
-    g.append(svg("polyline", { points: pts, fill: "none", stroke: "var(--accent)", "stroke-width": 2 }));
-    hist.forEach((p, i) => g.append(svg("circle", { cx: x(i), cy: y(p[1]), r: 3, fill: "var(--accent)" })));
+    g.append(svg("polyline", { points: hist.map((p, i) => `${x(i)},${y(p[1])}`).join(" "), fill: "none", stroke: "var(--accent)", "stroke-width": 2 }));
+    hist.forEach((p, i) => g.append(svg("circle", { cx: x(i), cy: y(p[1]), r: 3.5, fill: "var(--accent)" })));
     g.append(svg("line", { x1: x(hist.length - 1), y1: y(hist[hist.length - 1][1]), x2: x(yrs.length - 1), y2: y(f.mean), stroke: "var(--accent)", "stroke-dasharray": "4 3" }));
   }
   const xf = x(yrs.length - 1);
   g.append(svg("line", { x1: xf, x2: xf, y1: y(f.q90 ?? f.mean + f.sd), y2: y(f.q10 ?? f.mean - f.sd), stroke: "var(--accent)", "stroke-width": 8, opacity: 0.2, "stroke-linecap": "round" }));
   g.append(svg("circle", { cx: xf, cy: y(f.mean), r: 5, fill: "var(--panel)", stroke: "var(--accent)", "stroke-width": 2 }));
-  return g;
+
+  // hover: one invisible column per season; shows that season's rating on the model, percentile, matches
+  const tip = h("div", { class: "tip", hidden: true });
+  const wrap = h("div", { class: "chartwrap" }, g, tip);
+  const guide = svg("line", { y1: P / 2, y2: H - P, stroke: "var(--muted)", "stroke-dasharray": "2 3", opacity: 0 });
+  g.append(guide);
+  const colW = (W - 2 * P) / Math.max(1, yrs.length - 1);
+  const lines = (i) => {
+    if (i === yrs.length - 1) {
+      return [h("b", {}, `${S.meta.target_year} forecast`), h("div", {}, `Rating: ${fx(f.mean)} sd`),
+        h("div", { class: "muted" }, f.q10 != null ? `80% range ${fx(f.q10)} to ${fx(f.q90)}` : `± ${f.sd.toFixed(2)}`)];
+    }
+    const p = hist[i];
+    return [h("b", {}, String(p[0])), h("div", {}, `Rating: ${fx(p[1])} sd above the ${p[0]} average`),
+      p[2] != null ? h("div", {}, `${ordinal(p[2])} percentile`) : null,
+      p[3] != null ? h("div", { class: "muted" }, `${p[3]} matches${p[3] < 8 ? " (few: less reliable)" : ""}`) : null,
+      p[4] != null ? h("div", { class: "muted" }, `${S.meta.best_rating_model} raw: ${p[4]}`) : null];
+  };
+  yrs.forEach((_, i) => {
+    const r = svg("rect", { x: x(i) - colW / 2, y: 0, width: colW, height: H, fill: "transparent", style: "cursor:crosshair", tabindex: 0 });
+    const show = (ev) => {
+      tip.replaceChildren(...lines(i).filter(Boolean)); tip.hidden = false;
+      guide.setAttribute("x1", x(i)); guide.setAttribute("x2", x(i)); guide.setAttribute("opacity", 0.6);
+      const b = wrap.getBoundingClientRect(), cx = ev.clientX != null && ev.clientX ? ev.clientX - b.left : (x(i) / W) * b.width;
+      tip.style.left = Math.min(Math.max(0, cx + 12), b.width - 190) + "px"; tip.style.top = "6px";
+    };
+    r.addEventListener("pointerenter", show); r.addEventListener("pointermove", show); r.addEventListener("focus", show);
+    const hide = () => { tip.hidden = true; guide.setAttribute("opacity", 0); };
+    r.addEventListener("pointerleave", hide); r.addEventListener("blur", hide);
+    g.append(r);
+  });
+  return wrap;
 }
 
 function miniPath(path, next) {
@@ -119,7 +154,7 @@ function viewTeam(n) {
       a.p_direct != null ? h("div", { class: "card stat" }, "Direct Worlds (event win-type)", h("b", {}, pct(a.p_direct)), h("span", { class: "muted small" }, `Exp. regional pts ${a.exp_regional_pts}`)) : null,
       a.p_cmp != null ? h("div", { class: "card stat" }, "FIRST Championship", h("b", {}, pct(a.p_cmp)), h("span", { class: "muted small" }, a.district ? `${S.meta.districts[a.district]?.name || a.district} model` : "Regional model")) : null),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Trajectory"), trajectoryChart(t),
-      h("p", { class: "muted small" }, "Solid: past seasons. Dashed + band: forecast and 10–90% range.",
+      h("p", { class: "muted small" }, "Rating = the model's strength for that season, standardised against every team that year (0 = season average). Hover a season for details. Dashed + band: forecast and 10–90% range.",
         f.analog_edge != null ? ` Analog teams pull the forecast ${fx(f.analog_edge)} vs. a plain trend model.` : "")),
     f.analogs && f.analogs.length ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Teams that looked like this before"),
       h("p", { class: "muted small" }, "Past team-seasons with the closest trajectory shape, and what they did the next year (green = improved)."),
@@ -219,17 +254,19 @@ function viewModel() {
   const m = S.meta, fb = m.forecast_backtest;
   app.replaceChildren(h("h1", {}, "Model & validation"),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "1. Which rating model ranks teams best?"),
-      h("p", { class: "muted small" }, `Walk-forward backtest (every match predicted before the model sees its result), tuned on seasons before ${m.test_years[0]}, scored on ${m.test_years.join(", ")}. Lower log loss is better. Winner: `, h("b", {}, m.best_rating_model), "."),
+      h("p", { class: "muted small" }, `Walk-forward backtest (every match predicted before the model sees its result), tuned on seasons before ${m.test_years[0]}, scored on ${m.test_years.join(", ")}. Lower log loss is better. A stacked ensemble of the best few is used only if it beats every single model. In use: `, h("b", {}, m.best_rating_model), "."),
       table([{ label: "Model", left: true, render: (r) => r.model }, { label: "Log loss", render: (r) => r.test_logloss.toFixed(4) }, { label: "Brier", render: (r) => r.test_brier.toFixed(4) },
-        { label: "Accuracy", render: (r) => pct(r.test_acc) }, { label: "Matches", render: (r) => r.test_matches }], m.rating_leaderboard)),
+        { label: "Accuracy", render: (r) => pct(r.test_acc) }, { label: "Matches", render: (r) => r.test_matches }, { label: "Used", render: (r) => (r.selected ? "✓" : "") }], m.rating_leaderboard)),
     fb ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "2. Trajectory forecaster vs. baselines"),
       h("p", { class: "muted small" }, `Predicting each team's next-season strength, tested on ${fb.years.join(", ")} using only earlier seasons. RMSE in standard deviations; lower is better.`),
       table([{ label: "Method", left: true, render: (r) => r[0] }, { label: "RMSE", render: (r) => r[1].toFixed(3) }, { label: "MAE", render: (r) => r[2] }],
         [["Persistence (same as last year)", fb.persist.rmse, fb.persist.mae.toFixed(3)], ["Ridge (mean reversion + momentum)", fb.ridge.rmse, fb.ridge.mae.toFixed(3)],
          ["Analog teams (trajectory matching)", fb.analog.rmse, fb.analog.mae.toFixed(3)], [`Blend (analog weight ${m.blend_analog_weight})`, fb.blend.rmse, "–"]]),
       h("p", { class: "muted small" }, `10–90% analog interval coverage: ${pct(fb.analog_interval_coverage_10_90, 0)} (ideal 80%). The forecaster only leans on analogs as much as the backtest justifies.`)) : null,
-    h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "3. Assumptions"),
-      h("ul", {}, h("li", {}, m.rules_note), h("li", {}, m.game_note), h("li", {}, `${m.nsims} Monte Carlo simulations per run; each draws one strength per team and reuses it across all that team's events.`),
+    h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "3. Candidate models not included"),
+      h("ul", {}, (m.not_included || []).map((x) => h("li", {}, h("b", {}, x.model + ": "), x.why)))),
+    h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "4. Assumptions"),
+      h("ul", {}, h("li", {}, m.normalization), h("li", {}, m.rules_note), h("li", {}, m.game_note), h("li", {}, `${m.nsims} Monte Carlo simulations per run; each draws one strength per team and reuses it across all that team's events.`),
         h("li", {}, "Playoffs assume 8 alliances, double elimination (matches 1–13) then best-of-3 finals. Offseason events vary and are shown for strength only."))));
 }
 

@@ -152,3 +152,33 @@ def test_small_events_are_skipped_not_crashed():
     st = {t: (0.0, 0.8) for v in teams.values() for t in v}
     out = simulate.run_season(simulate.Sim(rules, 1.0, nsims=30), 2027, evs, teams, st, {}, log=lambda *_: None)
     assert set(out["events"]) == {"e1"} and sorted(out["skipped_small_events"]) == ["e0", "e2"]
+
+
+def test_season_normalisation_uses_teams_with_enough_matches():
+    rng = np.random.default_rng(0)
+    d = {2024: {t: float(rng.normal(5, 2)) for t in range(300)}}
+    counts = {2024: {t: (20 if t < 200 else 2) for t in range(300)}}
+    for t in range(200, 300):
+        d[2024][t] = 5.0                      # thinly observed teams sit on the prior
+    z = forecast.zscores(d, counts)[2024]
+    ref = np.array([z[t] for t in range(200)])
+    assert abs(ref.mean()) < 1e-9 and abs(ref.std() - 1) < 1e-9
+    pc = forecast.percentiles(forecast.zscores(d, counts), counts)[2024]
+    assert all(0 <= v <= 100 for v in pc.values())
+    assert pc[int(np.argmax([z[t] for t in range(200)]))] > 99
+
+
+def test_every_candidate_model_runs_and_ensemble_only_when_better():
+    d = synth.make_dataset(n_teams=500, years=range(2018, 2027), seed=9)
+    sel = ratings.select_model(d, [2025, 2026])
+    names = {r["model"] for r in sel["board"] if not r["model"].startswith("ensemble")}
+    assert names == set(ratings.GRID)
+    singles = [r for r in sel["board"] if not r["model"].startswith("ensemble")]
+    ens = [r for r in sel["board"] if r["model"].startswith("ensemble")]
+    if sel["selected"]["kind"] == "ensemble":
+        assert ens and ens[0]["test_logloss"] < min(r["test_logloss"] for r in singles)
+    else:
+        assert not ens or ens[0]["test_logloss"] >= min(r["test_logloss"] for r in singles) - 5e-4
+    es = ratings.selected_strengths(sel)
+    assert 2026 in es and len(es[2026]) > 100
+    assert sum(r["selected"] for r in sel["board"]) == 1

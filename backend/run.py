@@ -132,19 +132,19 @@ def main():
     test_years = played_years[-3:]
     log("played years", played_years, "test", test_years)
 
-    # 1) pick the best ranking model
-    board, best_name, best_params = ratings.backtest(data, test_years)
-    log("leaderboard:", json.dumps(board, default=jdefault)[:400])
-    model = ratings.MODELS[best_name](**best_params)
-    live = {}
-
-    def hook(y, e, m, p):
-        if y == played_years[-1]:
-            live[m["key"]] = p
-    _, end_strength = ratings.run(model, data, on_match=hook)
+    # 1) evaluate every candidate rating model (walk-forward), then try an ensemble; use whichever is most accurate
+    sel = ratings.select_model(data, test_years, log=log)
+    board, selected = sel["board"], sel["selected"]
+    end_strength, counts = ratings.selected_strengths(sel), sel["counts"]
+    if selected["kind"] == "single":
+        model_label = selected["name"]
+    else:
+        model_label = "ensemble: " + " + ".join(f"{m['model']} ({m['weight']:.2f})" for m in selected["members"])
+    log("selected rating model:", model_label)
 
     # 2) standardise, forecast backtest, forecast
-    z = forecast.zscores(end_strength)
+    z = forecast.zscores(end_strength, counts)            # every season standardised on teams with >= 8 matches
+    pct = forecast.percentiles(z, counts)
     fb = forecast.walk_forward(z, [y for y in played_years if y >= played_years[0] + 4][-4:]) if len(played_years) > 6 else None
     w = fb["blend"]["analog_weight"] if fb else 0.4
     fc = forecast.predict_next(z, a.target_year, blend_w=w)
@@ -152,7 +152,7 @@ def main():
     log("forecast backtest:", json.dumps(fb, default=jdefault)[:300] if fb else "n/a")
 
     # 3) match model calibration
-    beta = calibrate_beta(data, model, best_params, z, test_years)
+    beta = calibrate_beta(data, None, None, z, test_years)
     log("beta", beta)
 
     # 4) target-year strengths
@@ -198,7 +198,7 @@ def main():
             if e["start"] >= (dt.date.today() - dt.timedelta(days=60)).isoformat() or a.synthetic:
                 mp.setdefault(e["key"], [
                     {"key": m["key"], "lvl": m["lvl"], "num": m["num"], "set": m["set"], "red": m["red"], "blue": m["blue"],
-                     "rs": m["rs"], "bs": m["bs"], "p_red": round(live.get(m["key"], 0.5), 4), "pre_match": True}
+                     "rs": m["rs"], "bs": m["bs"], "p_red": round(ratings.selected_match_p(sel, m["key"]) or 0.5, 4), "pre_match": True}
                     for m in data["matches"].get(e["key"], [])])
 
     # 7) team table
@@ -208,8 +208,11 @@ def main():
     for t in sorted(set(fc) | tteams):
         f = fc.get(t)
         s = season["teams"].get(t, {})
+        hist = [[y, round(z[y][t], 3), round(pct[y][t], 1), counts.get(y, {}).get(t, 0),
+                 (round(float(end_strength[y][t]), 4) if selected["kind"] == "single" else None)]
+                for y in sorted(z) if t in z[y]]
         teams_out.append({
-            "team": t, "name": (info.get(t) or {}).get("name"), "rookie_year": data["rookie"].get(t),
+            "team": t, "name": (info.get(t) or {}).get("name"), "rookie_year": data["rookie"].get(t), "hist": hist,
             "z_now": round(z[cur_year].get(t), 3) if cur_year and t in z.get(cur_year, {}) else None,
             "forecast": ({k: (round(v, 3) if isinstance(v, float) else v) for k, v in f.items()} if f else
                          {"mean": strengths[t][0], "sd": strengths[t][1], "flags": ["no history"], "history": [], "analogs": []}),
@@ -224,10 +227,15 @@ def main():
                 "has_schedule": e["key"] in sched, "sim": season["events"].get(e["key"])}
                for e in data["events"] if e["year"] >= (cur_year or a.target_year)]
     meta = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "target_year": a.target_year,
-            "synthetic": a.synthetic, "best_rating_model": best_name, "best_params": best_params,
+            "synthetic": a.synthetic, "best_rating_model": model_label, "selected_model": selected,
             "rating_leaderboard": board, "test_years": test_years, "forecast_backtest": fb,
             "blend_analog_weight": w, "beta": beta, "nsims": a.nsims, "warnings": warnings,
             "districts": season["districts"], "rules_note": rules["_comment"],
+            "normalization": "Match scores are divided by the season's mean alliance score before any model sees them, and every season's team ratings are standardised (mean 0, sd 1) over teams with at least 8 matches that season, so years with different games are comparable.",
+            "not_included": [
+                {"model": "COPR (component OPR)", "why": "Needs per-year score_breakdown fields (game-specific). When components sum to the total score, summed component OPRs equal ordinary OPR, so it adds no predictive power for win/score prediction."},
+                {"model": "lOPR (logistic bonus-RP model)", "why": "Needs ranking-point bonus flags from score_breakdown, which are game-specific; the logistic win model (bt) is the nearest equivalent."},
+                {"model": "ACE", "why": "No published specification found; its description (blend of Elo-type and OPR-type models) is covered by the stacked ensemble, whose weights are learned from data."}],
             "game_note": "Qualification bonus-RP model is a placeholder until the 2027 game is released (Jan 9 2027)."}
     dump("meta.json", meta)
     dump("teams.json", teams_out)

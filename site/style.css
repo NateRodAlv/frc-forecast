@@ -48,3 +48,7 @@ td.flags{white-space:normal;max-width:210px;min-width:140px}
 .barbg{width:48px}
 .barbg{position:relative;overflow:hidden}
 .barbg .bar{position:absolute;left:0;top:0;height:8px;min-width:0}
+
+.chartwrap{position:relative;max-width:560px}
+.tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.18);z-index:3;white-space:nowrap}
+.tip b{font-size:13px}

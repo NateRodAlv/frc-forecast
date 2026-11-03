@@ -18,7 +18,7 @@ TBA responses are cached with ETags, so refreshes after the first mostly receive
 | Step | File | Notes |
 |---|---|---|
 | Fetch | `backend/frc/tba.py` | TBA v3: events, matches, rosters, awards, teams |
-| Rank | `backend/frc/ratings.py` | Elo vs additive-score (EPA-like) vs Bradley-Terry, walk-forward backtest; best log-loss wins automatically |
+| Rank | `backend/frc/ratings.py` | 10 candidates (margin Elo, plain Elo, AC-Elo, EPA-style, Bradley-Terry, pRidge, rOPR, wOPR, Lasso OPR, defence-augmented ridge). Each is tuned on early seasons only and scored by walk-forward backtest on the latest 3. A stacked ensemble of the best few is used **only if it beats every single model**. |
 | Trend forecast | `backend/frc/forecast.py` | Each team = a "price series" of yearly strength z-scores. Ridge (mean reversion + momentum) blended with **analog matching**: finds other teams whose past trajectory had the same shape (slump → rebound, breakout, decline) and uses what they did next. Blend weight set by backtest. |
 | Simulate | `backend/frc/simulate.py` | Monte Carlo: quals → alliance selection → double-elim → district/regional points → DCMP → Worlds slots |
 | Rules | `config/rules.json` | District slots, DCMP capacities, point values (2026 manual) |
@@ -26,6 +26,11 @@ TBA responses are cached with ETags, so refreshes after the first mostly receive
 
 Local preview without a key: `python backend/run.py --synthetic && cd site && python -m http.server`
 (shows a "SYNTHETIC DEMO DATA" banner). Tests: `python -m pytest -q tests`.
+
+## Normalisation
+Scores are divided by the season's mean alliance score before any model sees them, and each season's team ratings are
+standardised (mean 0, sd 1) over teams with at least 8 matches that season. Team pages show that rating, the percentile and the
+match count for every season on hover.
 
 ## Verified vs. NOT verified
 Verified against official sources: district point formulas (qualification formula reproduces the manual's 40-team table
@@ -44,4 +49,8 @@ exactly), alliance-selection points, playoff points, bracket matches 1–13 + be
 - Approximations: cultural-award winners are random with a mild strength tilt; declines/backups/waitlist and the Regional
   Pool's week-by-week release are ignored (final pool = top remaining by first-two-event points); teams with a single event
   aren't given projected second-event points; offseason events assume an 8-alliance bracket and give no advancement.
+- The extra models (pRidge, AC-Elo, etc.) are implemented from short descriptions, not from reference code, so details
+  (e.g. AC-Elo's K schedule) are my interpretation. Their claimed improvements are unverified; the backtest decides what is used.
+  COPR and lOPR are not included (they need game-specific score breakdowns; COPR adds nothing for total-score prediction), and
+  "ACE" has no published spec I could find, so the learned ensemble stands in for it.
 - 2020/2021 are skipped; strength carries across that gap with one season's worth of shrinkage.

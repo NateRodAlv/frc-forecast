@@ -19,14 +19,32 @@ FEATS = ["z0", "d1", "d2", "drawdown", "vol", "tenure"]
 SKIP_YEARS = {2020, 2021}   # no FRC season played
 
 
-def zscores(end_strength, min_teams=20):
+def zscores(end_strength, counts=None, min_teams=20, min_matches=8):
+    """Standardise strengths within each season (mean 0, sd 1). When per-team match counts are given the
+    mean/sd come only from teams with at least `min_matches` matches, so thinly-observed teams (whose ratings sit
+    near the prior) don't distort the scale; every team is then expressed on that season scale."""
     out = {}
     for y, d in end_strength.items():
         if len(d) < min_teams:
             continue
-        v = np.array(list(d.values()))
+        ref = list(d.values())
+        if counts and y in counts:
+            r2 = [s for t, s in d.items() if counts[y].get(t, 0) >= min_matches]
+            if len(r2) >= min_teams:
+                ref = r2
+        v = np.array(ref)
         mu, sd = v.mean(), v.std() or 1.0
         out[y] = {t: (s - mu) / sd for t, s in d.items()}
+    return out
+
+
+def percentiles(z, counts=None, min_matches=8):
+    """Percentile (0-100) of each team's season rating among teams with >= min_matches matches that season."""
+    out = {}
+    for y, d in z.items():
+        ref = [v for t, v in d.items() if not counts or counts.get(y, {}).get(t, 0) >= min_matches] or list(d.values())
+        ref = np.sort(np.array(ref))
+        out[y] = {t: float(100.0 * np.searchsorted(ref, v, side="right") / len(ref)) for t, v in d.items()}
     return out
 
 
