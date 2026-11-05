@@ -37,7 +37,7 @@ jobs:
       - name: Build model + site data
         env:
           TBA_KEY: ${{ secrets.TBA_KEY }}
-        run: python backend/run.py --target-year ${{ vars.TARGET_YEAR || '2027' }} --nsims 500
+        run: python backend/run.py --target-year ${{ vars.TARGET_YEAR || '2027' }} --nsims 400
       - name: Save TBA cache (even if the build failed, so a re-run resumes)
         if: always()
         uses: actions/cache/save@v4

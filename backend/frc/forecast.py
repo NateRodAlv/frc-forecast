@@ -1,24 +1,30 @@
-"""Year-over-year trajectory forecaster ("technical analysis" for FRC teams).
+"""Year-over-year trajectory forecaster ("technical analysis" for FRC teams), age-aware.
 
-Each team-season is reduced to z = end-of-season strength standardised within the year,
-making seasons comparable even though the game (and score scale) changes yearly.
-A team's history is a price series; we predict next season's z from its shape:
-level, 1y / 2y momentum, drawdown from peak (slump depth), volatility, tenure.
+Each team-season is reduced to z = end-of-season strength standardised within the year (see zscores), making
+seasons comparable even though the game changes yearly. A team's history is a price series; we predict the next
+season's z from its shape (level, 1y / 2y momentum, drawdown from peak, volatility) AND its true age
+(season - rookie year + 1, from TBA).
 
-Three predictors, all walk-forward backtested (train only on targets < test year):
+Predictors, all walk-forward backtested (trained only on targets < test year):
   persist : z_next = z (naive baseline)
-  ridge   : linear mean-reversion + momentum
-  analog  : k-nearest-neighbour over *other teams'* historical trajectories with the same
-            shape (e.g. "slump then rebound"), distance-weighted. Gives full outcome
-            distribution and the named analog teams as the explanation.
-Final = blend(ridge, analog) with the weight picked on the backtest.
+  ridge   : linear mean-reversion + momentum + age terms (rookie / 2nd / 3rd year, log age, short-history flags)
+  analog  : k-nearest-neighbour over OTHER teams' past team-seasons, restricted to the same age band AND the same
+            amount of observed history, comparing only the history that exists (no padding). A 2-season team is
+            only compared with other teams when THEY had 2 seasons. If a pool is too small it widens (see `level`).
+Final = blend(ridge, analog), weight chosen on the backtest.
 """
+import math
+
 import numpy as np
 
-FEATS = ["z0", "d1", "d2", "drawdown", "vol", "tenure"]
 SKIP_YEARS = {2020, 2021}   # no FRC season played
+FEATS = ["z0", "d1", "d2", "drawdown", "vol", "age1", "age2", "age3", "log_age", "L1", "L2"]
+BANDS = [(1, 1, "1"), (2, 2, "2"), (3, 3, "3"), (4, 4, "4"), (5, 7, "5-7"), (8, 12, "8-12"), (13, 999, "13+")]
+W5 = np.array([1.0, 0.9, 0.6, 0.8, 0.5])           # analog distance weights for z0, d1, d2, drawdown, vol
+SUBSETS = {1: [0], 2: [0, 1], 3: [0, 1, 2, 3, 4]}   # which of those exist with 1, 2, 3+ seasons of history
 
 
+# ---------------------------------------------------------------- season normalisation
 def zscores(end_strength, counts=None, min_teams=20, min_matches=8):
     """Standardise strengths within each season (mean 0, sd 1). When per-team match counts are given the
     mean/sd come only from teams with at least `min_matches` matches, so thinly-observed teams (whose ratings sit
@@ -59,30 +65,59 @@ def histories(z):
     return h
 
 
-def features(series):
-    """series: list of z oldest->newest (>=1). Returns feature vector or None."""
+# ---------------------------------------------------------------- age
+def age_band(age):
+    if age is None:
+        return "?"
+    for lo, hi, name in BANDS:
+        if lo <= age <= hi:
+            return name
+    return "13+"
+
+
+def rookie_of(team, ser, rookie, first_year):
+    """Rookie year from TBA; if unknown, the first season seen -- but only when that is after the data window
+    starts (otherwise the team may be much older and we leave its age unknown rather than guess it is a rookie)."""
+    r = (rookie or {}).get(team)
+    if r:
+        return r
+    return ser[0][0] if ser[0][0] > first_year else None
+
+
+def age_at(season, rookie_year):
+    return None if rookie_year is None else max(1, season - rookie_year + 1)
+
+
+def features(series, age):
+    """series: z values oldest->newest (>=1). age: true age at the last season (None if unknown)."""
+    L = len(series)
     z0 = series[-1]
-    z1 = series[-2] if len(series) > 1 else z0
-    z2 = series[-3] if len(series) > 2 else z1
+    z1 = series[-2] if L > 1 else z0
+    z2 = series[-3] if L > 2 else z1
     window = series[-4:]
-    return np.array([z0, z0 - z1, z1 - z2, max(window) - z0, float(np.std(window)) if len(window) > 1 else 0.5,
-                     min(len(series), 8) / 8.0])
+    a = age if age is not None else max(L, 6)
+    return np.array([z0, z0 - z1, z1 - z2, max(window) - z0, float(np.std(window)) if L > 1 else 0.5,
+                     float(a == 1), float(a == 2), float(a == 3), math.log(min(a, 25)), float(L == 1), float(L == 2)])
 
 
-def build_pairs(h, z, max_target=None):
-    """Training pairs (features at season i -> z at next played season)."""
+def build_pairs(h, rookie=None, first_year=None, max_target=None):
+    """Training pairs: (shape+age features at season i) -> z at the team's next played season."""
     X, y, meta = [], [], []
     for t, ser in h.items():
+        rk = rookie_of(t, ser, rookie, first_year if first_year is not None else ser[0][0] - 1)
         for i in range(len(ser) - 1):
             ty = ser[i + 1][0]
             if max_target is not None and ty > max_target:
                 continue
-            X.append(features([v for _, v in ser[: i + 1]]))
+            age = age_at(ser[i][0], rk)
+            X.append(features([v for _, v in ser[: i + 1]], age))
             y.append(ser[i + 1][1])
-            meta.append((t, ser[i][0], ty, [round(v, 2) for _, v in ser[max(0, i - 3): i + 1]], round(ser[i + 1][1], 2)))
+            meta.append((t, ser[i][0], ty, [round(v, 2) for _, v in ser[max(0, i - 3): i + 1]], round(ser[i + 1][1], 2),
+                         age_band(age), min(i + 1, 3)))
     return np.array(X), np.array(y), meta
 
 
+# ---------------------------------------------------------------- models
 class Ridge:
     def __init__(self, lam=3.0):
         self.lam = lam
@@ -101,132 +136,181 @@ class Ridge:
 
 
 class Analog:
-    """kNN on standardised shape features; weights emphasise trajectory shape over level."""
+    """kNN over past team-seasons. With age_match=True the candidate pool is restricted to the same age band and
+    the same history length, and only the features that exist for that history length are compared."""
 
-    def __init__(self, k=60, wts=(1.0, 0.9, 0.6, 0.8, 0.5, 0.3)):
-        self.k, self.wts = k, np.array(wts)
+    def __init__(self, k=60, min_pool=80, age_match=True):
+        self.k, self.min_pool, self.age_match = k, min_pool, age_match
 
     def fit(self, X, y, meta):
-        self.mu, self.sd = X.mean(0), X.std(0) + 1e-9
-        self.Z = (X - self.mu) / self.sd * self.wts
+        self.mu, self.sd = X[:, :5].mean(0), X[:, :5].std(0) + 1e-9
+        self.Z = (X[:, :5] - self.mu) / self.sd * W5
         self.y, self.meta = y, meta
+        self.band = np.array([m[5] for m in meta])
+        self.lc = np.array([m[6] for m in meta])
         return self
 
-    def neighbours(self, x):
-        q = (x - self.mu) / self.sd * self.wts
-        d = np.sqrt(((self.Z - q) ** 2).sum(1))
-        idx = np.argsort(d)[: self.k]
-        w = 1.0 / (d[idx] + 0.25)
-        return idx, w / w.sum(), d[idx]
+    def neighbours(self, x, band, lc):
+        """Returns (indices, weights, distances, level, pool_size). level 0 = same age band + same history length,
+        1 = same age band only, 2 = everyone (pool too small)."""
+        if self.age_match:
+            cols = SUBSETS[lc]
+            pool = np.where((self.band == band) & (self.lc == lc))[0]
+            level = 0
+            if len(pool) < self.min_pool:
+                pool, level = np.where(self.band == band)[0], 1
+            if len(pool) < self.min_pool:
+                pool, level = np.arange(len(self.y)), 2
+        else:
+            cols, pool, level = SUBSETS[3], np.arange(len(self.y)), 2
+        q = (x[:5] - self.mu) / self.sd * W5
+        d = np.sqrt(((self.Z[pool][:, cols] - q[cols]) ** 2).sum(1))
+        o = np.argsort(d)[: self.k]
+        w = 1.0 / (d[o] + 0.25)
+        return pool[o], w / w.sum(), d[o], level, len(pool)
 
-    def predict(self, X, quantiles=(0.1, 0.5, 0.9)):
+    def predict(self, X, bands, lcs, quantiles=(0.1, 0.5, 0.9)):
         mean, qs = [], []
-        for x in X:
-            idx, w, _ = self.neighbours(x)
+        for x, b, lc in zip(X, bands, lcs):
+            idx, w, _, _, _ = self.neighbours(x, b, lc)
             yy = self.y[idx]
-            m = float((w * yy).sum())
             o = np.argsort(yy)
             cw = np.cumsum(w[o])
-            qs.append([float(yy[o][np.searchsorted(cw, q)]) for q in quantiles])
-            mean.append(m)
+            qs.append([float(yy[o][min(np.searchsorted(cw, q), len(yy) - 1)]) for q in quantiles])
+            mean.append(float((w * yy).sum()))
         return np.array(mean), np.array(qs)
 
 
-def walk_forward(z, test_years, k=60):
-    """Return metrics per method and the best blend weight (analog share)."""
+# ---------------------------------------------------------------- backtest
+def walk_forward(z, test_years, rookie=None, k=60):
+    """Return metrics per method and the best blend weight (analog share). Trains only on targets < test year."""
     h = histories(z)
+    first_year = min(z)
     rows = []
     for ty in test_years:
-        Xtr, ytr, mtr = build_pairs(h, z, max_target=ty - 1)
+        Xtr, ytr, mtr = build_pairs(h, rookie, first_year, max_target=ty - 1)
         if len(Xtr) < 200:
             continue
-        # test pairs: target year == ty
-        Xte, yte = [], []
+        Xte, yte, bands, lcs = [], [], [], []
         for t, ser in h.items():
             yrs = [a for a, _ in ser]
             if ty in yrs:
                 i = yrs.index(ty)
                 if i >= 1:
-                    Xte.append(features([v for _, v in ser[:i]]))
-                    yte.append(ser[i][1])
+                    sub = ser[:i]
+                    age = age_at(sub[-1][0], rookie_of(t, ser, rookie, first_year))
+                    Xte.append(features([v for _, v in sub], age)); yte.append(ser[i][1])
+                    bands.append(age_band(age)); lcs.append(min(len(sub), 3))
         if len(Xte) < 50:
             continue
         Xte, yte = np.array(Xte), np.array(yte)
         rg = Ridge().fit(Xtr, ytr)
         an = Analog(k=k).fit(Xtr, ytr, mtr)
-        pr = rg.predict(Xte)
-        pa, qa = an.predict(Xte)
-        rows.append({"year": ty, "yte": yte, "persist": Xte[:, 0], "ridge": pr, "analog": pa, "qa": qa})
+        an0 = Analog(k=k, age_match=False).fit(Xtr, ytr, mtr)
+        pa, qa = an.predict(Xte, bands, lcs)
+        pn, _ = an0.predict(Xte, bands, lcs)
+        rows.append({"year": ty, "yte": yte, "persist": Xte[:, 0], "ridge": rg.predict(Xte), "analog": pa,
+                     "analog_nomatch": pn, "qa": qa, "bands": np.array(bands)})
     if not rows:
         return None
-    y = np.concatenate([r["yte"] for r in rows])
+    cat = lambda key: np.concatenate([r[key] for r in rows])  # noqa
+    y = cat("yte")
     out = {}
-    for m in ("persist", "ridge", "analog"):
-        p = np.concatenate([r[m] for r in rows])
+    for m in ("persist", "ridge", "analog", "analog_nomatch"):
+        p = cat(m)
         out[m] = {"mae": float(np.mean(np.abs(y - p))), "rmse": float(np.sqrt(np.mean((y - p) ** 2)))}
-    pr, pa = np.concatenate([r["ridge"] for r in rows]), np.concatenate([r["analog"] for r in rows])
+    pr, pa = cat("ridge"), cat("analog")
     best_w, best = 0.5, 9
     for w in np.linspace(0, 1, 11):
         e = float(np.sqrt(np.mean((y - ((1 - w) * pr + w * pa)) ** 2)))
         if e < best:
             best, best_w = e, float(w)
     out["blend"] = {"analog_weight": best_w, "rmse": best}
-    qa = np.concatenate([r["qa"] for r in rows])
+    qa = cat("qa")
     out["analog_interval_coverage_10_90"] = float(np.mean((y >= qa[:, 0]) & (y <= qa[:, 2])))
+    bl = (1 - best_w) * pr + best_w * pa
+    bands = cat("bands")
+    out["by_age"] = {}
+    for name in [b[2] for b in BANDS] + ["?"]:
+        m = bands == name
+        if m.sum() >= 30:
+            out["by_age"][name] = {"n": int(m.sum()), **{k2: float(np.sqrt(np.mean((y[m] - v[m]) ** 2))) for k2, v in
+                                                          (("persist", cat("persist")), ("ridge", pr), ("analog", pa), ("blend", bl))}}
     out["n_test"] = int(len(y))
     out["years"] = [r["year"] for r in rows]
     return out
 
 
-def predict_next(z, next_year, blend_w=0.5, k=60, rookie_prior=None):
-    """Forecast next season z for every team with history. Returns dict team -> forecast."""
+# ---------------------------------------------------------------- forecast
+def predict_next(z, next_year, blend_w=0.5, k=60, rookie=None):
+    """Forecast next season z for every recently active team. Returns dict team -> forecast.
+    Tags are split in two groups: `shape` (what last season looked like) and `outlook` (what the forecast expects)."""
     h = histories(z)
-    Xtr, ytr, mtr = build_pairs(h, z)
+    first_year = min(z)
+    Xtr, ytr, mtr = build_pairs(h, rookie, first_year)
     rg = Ridge().fit(Xtr, ytr)
     an = Analog(k=k).fit(Xtr, ytr, mtr)
-    teams = [t for t, s in h.items() if s[-1][0] >= max(z) - 1 or s[-1][0] >= next_year - 3]
-    X = np.array([features([v for _, v in h[t]]) for t in teams])
+    teams = [t for t, s in h.items() if s[-1][0] >= next_year - 3]
+    X, bands, lcs, ages = [], [], [], []
+    for t in teams:
+        ser = h[t]
+        age = age_at(ser[-1][0], rookie_of(t, ser, rookie, first_year))
+        X.append(features([v for _, v in ser], age)); ages.append(age)
+        bands.append(age_band(age)); lcs.append(min(len(ser), 3))
+    X = np.array(X)
     pr = rg.predict(X)
-    pa, qa = an.predict(X)
+    pa, qa = an.predict(X, bands, lcs)
     mean = (1 - blend_w) * pr + blend_w * pa
     out = {}
     for i, t in enumerate(teams):
-        idx, w, d = an.neighbours(X[i])
+        idx, w, d, level, pool_n = an.neighbours(X[i], bands[i], lcs[i])
         yy = an.y[idx]
-        # residual spread of analogs around their own mean = outcome uncertainty
-        sd = float(np.sqrt(np.sum(w * (yy - pa[i]) ** 2)))
-        sd = float(np.sqrt(sd ** 2 + 0.0))  # kept explicit: no extra inflation
-        top = np.argsort(d)[:5]
-        analogs = [{"team": an.meta[idx[j]][0], "year": an.meta[idx[j]][1],
-                    "path": an.meta[idx[j]][3], "next": an.meta[idx[j]][4]} for j in top]
+        sd = max(float(np.sqrt(np.sum(w * (yy - pa[i]) ** 2))), 0.25)
+        analogs, seen = [], set()
+        for j in np.argsort(d):                         # nearest first, one entry per team
+            m = an.meta[idx[j]]
+            if m[0] in seen:
+                continue
+            seen.add(m[0])
+            analogs.append({"team": m[0], "year": m[1], "path": m[3], "next": m[4], "age_band": m[5]})
+            if len(analogs) == 5:
+                break
+        d1, dd, z0 = X[i, 1], X[i, 3], X[i, 0]
         edge = float(pa[i] - pr[i])
-        flags = []
-        if X[i, 3] > 0.8 and X[i, 1] > 0.3:
-            flags.append("rebounding after slump")
-        if X[i, 3] > 1.0 and X[i, 1] < 0:
-            flags.append("in drawdown")
-        if X[i, 1] < -0.6:
-            flags.append("sharp decline")
-        if X[i, 1] > 0.6:
-            flags.append("breakout momentum")
-        if edge > 0.25:
-            flags.append("analogs see upside")
-        if edge < -0.25:
-            flags.append("analogs see downside")
-        out[t] = {"z_last": float(X[i, 0]), "mean": float(mean[i]), "sd": max(sd, 0.25),
+        shape, outlook = [], []
+        if ages[i] is not None and ages[i] <= 3:
+            shape.append(f"young team (season {ages[i]} last year)")
+        if dd > 0.8 and d1 > 0.3:
+            shape.append("rebounded last season after a slump")
+        if dd > 1.0 and d1 < 0:
+            shape.append("still well below its recent peak")
+        if d1 < -0.6:
+            shape.append("big drop last season")
+        if d1 > 0.6:
+            shape.append("big jump last season")
+        delta = float(mean[i] - z0)
+        if delta > 0.25:
+            outlook.append("expected to improve")
+        elif delta < -0.25:
+            outlook.append("expected to regress")
+        if blend_w >= 0.1 and abs(edge) > 0.25:       # analog tags only when analogs actually feed the forecast
+            outlook.append("similar teams did better than the trend model expects" if edge > 0 else
+                           "similar teams did worse than the trend model expects")
+        out[t] = {"z_last": float(z0), "mean": float(mean[i]), "sd": sd,
                   "q10": float(qa[i, 0]), "q50": float(qa[i, 1]), "q90": float(qa[i, 2]),
                   "ridge": float(pr[i]), "analog": float(pa[i]), "analog_edge": edge,
-                  "history": [[a, round(v, 2)] for a, v in h[t][-6:]], "analogs": analogs, "flags": flags}
+                  "age": ages[i], "analog_pool": {"age_band": bands[i], "history": ("3+" if lcs[i] == 3 else str(lcs[i])),
+                                                  "n": int(pool_n), "level": int(level)},
+                  "history": [[a, round(v, 2)] for a, v in h[t][-6:]], "analogs": analogs,
+                  "shape_flags": shape, "outlook_flags": outlook, "flags": shape + outlook}
     return out
 
 
 def rookie_prior(z, rookie_year):
-    """Mean/sd of z in a team's first season (and second) from history."""
-    first, second = [], []
+    """Mean/sd of z in a team's first season from history."""
+    first = []
     for t, ser in histories(z).items():
         if len(ser) >= 1 and rookie_year.get(t) == ser[0][0]:
             first.append(ser[0][1])
-            if len(ser) > 1:
-                second.append(ser[1][1])
     f = (float(np.mean(first)), float(np.std(first))) if first else (-0.6, 0.8)
     return {"mean": f[0], "sd": max(f[1], 0.5)}

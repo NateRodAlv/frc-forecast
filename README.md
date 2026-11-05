@@ -27,6 +27,23 @@ TBA responses are cached with ETags, so refreshes after the first mostly receive
 Local preview without a key: `python backend/run.py --synthetic && cd site && python -m http.server`
 (shows a "SYNTHETIC DEMO DATA" banner). Tests: `python -m pytest -q tests`.
 
+## Forecast accuracy: the Scorecard tab
+Every run replays the previous season as if it were still to come: the **same production code** (`pipeline.build_forecast`) is
+trained on seasons before it only, forecasts it with random qualification schedules, and the results are scored against what
+really happened — team strength error vs. "same as last year", preseason match accuracy, event-winner/finalist calibration,
+District Championship and Worlds odds, and expected-vs-actual slot counts per district. Once the target season starts, its
+completed events are scored live. A leak test (`tests/test_frc.py::test_cutoff_blocks_target_season_results`) checks that
+scrambling the target season's results cannot change its forecast.
+
+Caveats: replay uses the actual event rosters (known only approximately in a real preseason); "made Worlds / DCMP" is judged by
+attendance, which ignores declines and waitlist moves; forecasts do **not** yet update as the target season is played.
+
+## Team age
+Age = season − rookie year + 1 (rookie years from TBA). The ridge forecaster has rookie / 2nd / 3rd-year and log-age terms, and
+analog matching only compares a team with past team-seasons of the same age band (1, 2, 3, 4, 5-7, 8-12, 13+) AND the same amount of
+history, using only the history that exists (no padding). Pools that are too small widen automatically. The Model tab shows
+the backtest with and without age matching, and error by age.
+
 ## Normalisation
 Scores are divided by the season's mean alliance score before any model sees them, and each season's team ratings are
 standardised (mean 0, sd 1) over teams with at least 8 matches that season. Team pages show that rating, the percentile and the

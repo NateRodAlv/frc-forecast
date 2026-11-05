@@ -182,3 +182,91 @@ def test_every_candidate_model_runs_and_ensemble_only_when_better():
     es = ratings.selected_strengths(sel)
     assert 2026 in es and len(es[2026]) > 100
     assert sum(r["selected"] for r in sel["board"]) == 1
+
+
+# ------------------------------------------------------------------ replay / age / scoring
+def _rules_syn():
+    rules = json.loads((ROOT / "config/rules.json").read_text())
+    rules["districts"]["syn"] = {"name": "s", "cmp_slots": 20, "dcmp_capacity": 60, "impact": 1, "ei": 1, "ras": 1, "aliases": ["syn"]}
+    return rules
+
+
+def test_cutoff_blocks_target_season_results():
+    """Forecast for season T must not change if T's match RESULTS are deleted or scrambled."""
+    from frc import pipeline
+    d = synth.make_dataset(n_teams=450, years=range(2017, 2027), seed=21)
+    rules = _rules_syn()
+    for e in d["events"]:
+        if e["year"] == 2026:
+            e["district"] = "syn"
+    a = pipeline.build_forecast(d, 2026, rules, nsims=30, log=lambda *_: None, use_schedules=False)
+    rng = np.random.default_rng(0)
+    for e in d["events"]:
+        if e["year"] == 2026:
+            for m in d["matches"][e["key"]]:
+                m["rs"], m["bs"] = int(rng.integers(0, 200)), int(rng.integers(0, 200))
+    b = pipeline.build_forecast(d, 2026, rules, nsims=30, log=lambda *_: None, use_schedules=False)
+    assert a["sel"]["selected"] == b["sel"]["selected"] and a["beta"] == b["beta"]
+    assert all(abs(a["fc"][t]["mean"] - b["fc"][t]["mean"]) < 1e-12 for t in a["fc"])
+    assert a["season"]["teams"] == b["season"]["teams"]
+    assert max(a["z"]) == 2025                     # 2026 never reaches the rating history
+
+
+def test_age_matched_analogs_use_same_age_and_history():
+    d = synth.make_dataset(n_teams=700, years=range(2012, 2027), seed=5)
+    _, es = ratings.run(ratings.EPA(carry=0.7, lr0=0.6), d)
+    z = forecast.zscores(es)
+    h = forecast.histories(z)
+    X, y, meta = forecast.build_pairs(h, d["rookie"], min(z))
+    an = forecast.Analog(k=40, min_pool=50).fit(X, y, meta)
+    q = X[0]
+    for band, lc in (("2", 2), ("1", 1), ("13+", 3)):
+        idx, w, dist, level, n = an.neighbours(q, band, lc)
+        if level == 0:
+            assert all(meta[i][5] == band and meta[i][6] == lc for i in idx)
+    # with 1 season of history only the rating level is compared: changing momentum features must not change neighbours
+    q2 = q.copy(); q2[1] += 3.0; q2[3] += 2.0
+    i1 = an.neighbours(q, "13+", 1)[0]; i2 = an.neighbours(q2, "13+", 1)[0]
+    assert list(i1) == list(i2)
+
+
+def test_tags_are_consistent():
+    d = synth.make_dataset(n_teams=700, years=range(2012, 2027), seed=6)
+    _, es = ratings.run(ratings.EPA(carry=0.7, lr0=0.6), d)
+    z = forecast.zscores(es)
+    for w in (0.0, 0.5):
+        fc = forecast.predict_next(z, 2027, blend_w=w, rookie=d["rookie"])
+        for v in fc.values():
+            s, o = " ".join(v["shape_flags"]), " ".join(v["outlook_flags"])
+            assert not ("big jump" in s and "big drop" in s)
+            assert not ("did better" in o and "did worse" in o)
+            assert not ("improve" in o and "regress" in o)
+            if w == 0.0:
+                assert "similar teams" not in o       # analog tags hidden while analogs have no weight
+
+
+def test_scoring_helpers():
+    from frc import score
+    rng = np.random.default_rng(1)
+    p = rng.uniform(0.02, 0.6, 3000); o = (rng.random(3000) < p).astype(float)
+    m = score.prob_metrics(p, o)
+    assert m["skill"] > 0.05 and abs(m["expected"] - m["actual"]) < 0.06 * m["expected"]
+    assert all(abs(b["pred"] - b["actual"]) < 0.12 for b in m["bins"] if b["n"] > 100)     # calibrated by construction
+    assert score.prob_metrics([0.5] * 5, [1] * 5) is None                                 # too few cases
+    mk = lambda lvl, n, r, b: {"lvl": lvl, "set": 1, "num": n, "red": [1, 2, 3], "blue": [4, 5, 6], "rs": r, "bs": b}
+    assert score.finals_outcome([mk("f", 1, 10, 5), mk("f", 2, 4, 9), mk("f", 3, 8, 2)]) == ({1, 2, 3}, {4, 5, 6})
+    assert score.finals_outcome([mk("f", 1, 10, 5)]) is None                              # undecided
+    ev = {"year": 2026, "key": "e", "type": 1}
+    data = {"events": [ev], "matches": {"e": [mk("f", 1, 10, 5), mk("f", 2, 9, 3)]}}
+    sim = {"e": {"teams": {str(t): {"p_win": 0.5 if t <= 3 else 0.0, "p_finalist": 1.0 if t <= 6 else 0.0} for t in range(1, 25)}}}
+    r = score.score_events(2026, data, sim)
+    assert r["events"] == 1 and r["win"]["actual"] == 3
+
+
+def test_advancement_not_scored_without_rosters():
+    from frc import score
+    rules = _rules_syn()
+    season = {"teams": {t: {"model": "district", "district": "syn", "p_dcmp": 0.5, "p_cmp": 0.1} for t in range(60)}}
+    data = {"events": [], "event_teams": {}, "matches": {}}
+    r = score.score_advancement(2026, data, season, rules, {"syn": "syn"})
+    assert r["dcmp"] is None and r["cmp_district"] is None and r["slots"][0]["cmp_actual"] is None

@@ -44,8 +44,18 @@ function table(cols, rows, opts = {}) {
   return h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, head), h("tbody", {}, body)));
 }
 
-function flagPills(flags) {
-  return (flags || []).map((f) => h("span", { class: "pill " + (/upside|rebound|breakout/.test(f) ? "up" : /downside|decline|drawdown/.test(f) ? "down" : "") }, f));
+const UP_RE = /improve|jump|rebound|did better/, DOWN_RE = /regress|drop|below|did worse/;
+const pill = (f) => h("span", { class: "pill " + (UP_RE.test(f) ? "up" : DOWN_RE.test(f) ? "down" : "") }, f);
+// compact (table): last-season tags, an arrow, then outlook tags
+function flagPills(fc) {
+  const shape = fc.shape_flags || fc.flags || [], out = fc.outlook_flags || [];
+  return [...shape.map(pill), out.length ? h("span", { class: "sep" }, shape.length ? "→" : "outlook:") : null, ...out.map(pill)];
+}
+// labelled (team page)
+function flagGroups(fc) {
+  const shape = fc.shape_flags || fc.flags || [], out = fc.outlook_flags || [];
+  return [shape.length ? h("span", { class: "muted small" }, "Last season: ") : null, ...shape.map(pill),
+    out.length ? h("span", { class: "muted small", style: "margin-left:8px" }, "Outlook: ") : null, ...out.map(pill)];
 }
 
 function viewRankings() {
@@ -62,7 +72,7 @@ function viewRankings() {
       { key: "mean", label: `${S.meta.target_year} forecast`, tip: "Predicted strength in standard deviations above the field average", render: (t) => `${fx(t.forecast.mean)} ± ${t.forecast.sd.toFixed(2)}` },
       { key: "now", label: "Last season", render: (t) => fx(t.z_now) },
       { key: "delta", label: "Δ", tip: "Forecast minus last season", render: (t) => { const d = t.forecast.mean - (t.z_now ?? t.forecast.mean); return h("span", { class: d > 0.05 ? "pos" : d < -0.05 ? "neg" : "" }, fx(d)); } },
-      { key: "flags", label: "Trend signals", left: true, cls: "flags", render: (t) => flagPills(t.forecast.flags) },
+      { key: "flags", label: "Trend signals", left: true, cls: "flags", render: (t) => flagPills(t.forecast) },
       { key: "dcmp", label: "District Champ / Direct", tip: "P(qualify for district championship) or P(direct Worlds spot at a regional)", render: (t) => pct(t.adv.p_dcmp ?? t.adv.p_direct) },
       { key: "cmp", label: "Worlds", render: (t) => (t.adv.p_cmp != null ? bar(t.adv.p_cmp) : "–") },
     ];
@@ -75,6 +85,8 @@ function viewRankings() {
   draw();
 }
 
+const AGE_ORDER = ["1", "2", "3", "4", "5-7", "8-12", "13+", "?"];
+const byAge = (o) => Object.entries(o).sort((x, y) => AGE_ORDER.indexOf(x[0]) - AGE_ORDER.indexOf(y[0]));
 const ordinal = (n) => { n = Math.round(n); const s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
 
 function trajectoryChart(t) {
@@ -147,7 +159,7 @@ function viewTeam(n) {
   const evs = S.events.filter((e) => e.sim && e.sim.teams[n]);
   app.replaceChildren(
     h("h1", {}, `Team ${n} ${t.name ? "· " + t.name : ""}`),
-    h("div", { class: "row" }, flagPills(f.flags), h("span", { class: "muted small" }, `Rank #${t.rank} of ${S.teams.length} · rookie year ${t.rookie_year ?? "?"}`)),
+    h("div", { class: "row" }, flagGroups(f), h("span", { class: "muted small" }, `Rank #${t.rank} of ${S.teams.length} · rookie year ${t.rookie_year ?? "?"}`)),
     h("div", { class: "grid" },
       h("div", { class: "card stat" }, "Forecast strength", h("b", {}, fx(f.mean)), h("span", { class: "muted small" }, f.q10 != null ? `80% range ${fx(f.q10)} to ${fx(f.q90)}` : `± ${f.sd.toFixed(2)}`)),
       a.p_dcmp != null ? h("div", { class: "card stat" }, "District championship", h("b", {}, pct(a.p_dcmp)), h("span", { class: "muted small" }, `Exp. district pts ${a.exp_district_pts}`)) : null,
@@ -157,7 +169,7 @@ function viewTeam(n) {
       h("p", { class: "muted small" }, "Rating = the model's strength for that season, standardised against every team that year (0 = season average). Hover a season for details. Dashed + band: forecast and 10–90% range.",
         f.analog_edge != null ? ` Analog teams pull the forecast ${fx(f.analog_edge)} vs. a plain trend model.` : "")),
     f.analogs && f.analogs.length ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Teams that looked like this before"),
-      h("p", { class: "muted small" }, "Past team-seasons with the closest trajectory shape, and what they did the next year (green = improved)."),
+      h("p", { class: "muted small" }, f.analog_pool ? `Compared only with past team-seasons at the same age (${f.analog_pool.age_band}) and the same amount of history (${f.analog_pool.history} season${f.analog_pool.history === "1" ? "" : "s"}): ${f.analog_pool.n} candidates${f.analog_pool.level > 0 ? ", pool too small so the match was widened" : ""}. ` : "", "Closest trajectories and what they did the next year (green = improved)."),
       table([{ label: "Team", left: true, render: (r) => teamLink(r.team) }, { label: "Season", render: (r) => r.year },
         { label: "Path", render: (r) => miniPath(r.path, r.next) }, { label: "Next season", render: (r) => fx(r.next) }], f.analogs)) : null,
     evs.length ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, `${S.meta.target_year} events`),
@@ -260,14 +272,73 @@ function viewModel() {
     fb ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "2. Trajectory forecaster vs. baselines"),
       h("p", { class: "muted small" }, `Predicting each team's next-season strength, tested on ${fb.years.join(", ")} using only earlier seasons. RMSE in standard deviations; lower is better.`),
       table([{ label: "Method", left: true, render: (r) => r[0] }, { label: "RMSE", render: (r) => r[1].toFixed(3) }, { label: "MAE", render: (r) => r[2] }],
-        [["Persistence (same as last year)", fb.persist.rmse, fb.persist.mae.toFixed(3)], ["Ridge (mean reversion + momentum)", fb.ridge.rmse, fb.ridge.mae.toFixed(3)],
-         ["Analog teams (trajectory matching)", fb.analog.rmse, fb.analog.mae.toFixed(3)], [`Blend (analog weight ${m.blend_analog_weight})`, fb.blend.rmse, "–"]]),
-      h("p", { class: "muted small" }, `10–90% analog interval coverage: ${pct(fb.analog_interval_coverage_10_90, 0)} (ideal 80%). The forecaster only leans on analogs as much as the backtest justifies.`)) : null,
+        [["Persistence (same as last year)", fb.persist.rmse, fb.persist.mae.toFixed(3)], ["Ridge (mean reversion + momentum + age)", fb.ridge.rmse, fb.ridge.mae.toFixed(3)],
+         ["Analog teams (same age band + history length)", fb.analog.rmse, fb.analog.mae.toFixed(3)], ...(fb.analog_nomatch ? [["Analog teams, no age matching", fb.analog_nomatch.rmse, fb.analog_nomatch.mae.toFixed(3)]] : []), [`Blend (analog weight ${m.blend_analog_weight})`, fb.blend.rmse, "–"]]),
+      h("p", { class: "muted small" }, `10–90% analog interval coverage: ${pct(fb.analog_interval_coverage_10_90, 0)} (ideal 80%). The forecaster only leans on analogs as much as the backtest justifies.`),
+      fb.by_age ? h("div", {}, h("p", { class: "muted small" }, "Error by team age (RMSE, lower is better):"),
+        table([{ label: "Age", left: true, render: (r) => r[0] }, { label: "Team-seasons", render: (r) => r[1].n }, { label: "Persistence", render: (r) => r[1].persist.toFixed(3) },
+          { label: "Ridge", render: (r) => r[1].ridge.toFixed(3) }, { label: "Analog", render: (r) => r[1].analog.toFixed(3) }, { label: "Blend", render: (r) => r[1].blend.toFixed(3) }], byAge(fb.by_age))) : null) : null,
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "3. Candidate models not included"),
       h("ul", {}, (m.not_included || []).map((x) => h("li", {}, h("b", {}, x.model + ": "), x.why)))),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "4. Assumptions"),
       h("ul", {}, h("li", {}, m.normalization), h("li", {}, m.rules_note), h("li", {}, m.game_note), h("li", {}, `${m.nsims} Monte Carlo simulations per run; each draws one strength per team and reuses it across all that team's events.`),
         h("li", {}, "Playoffs assume 8 alliances, double elimination (matches 1–13) then best-of-3 finals. Offseason events vary and are shown for strength only."))));
+}
+
+
+const stat = (label, val, sub) => h("div", { class: "card stat" }, label, h("b", {}, val), sub ? h("span", { class: "muted small" }, sub) : null);
+
+function probCard(title, pm, blurb) {
+  const head = h("h2", { style: "margin-top:0" }, title);
+  if (!pm) return h("div", { class: "card" }, head, blurb ? h("p", { class: "muted small" }, blurb) : null, h("p", { class: "muted" }, "Not enough data to score this."));
+  return h("div", { class: "card" }, head, blurb ? h("p", { class: "muted small" }, blurb) : null,
+    h("div", { class: "grid" }, stat("Cases scored", pm.n.toLocaleString()), stat("Brier score", pm.brier.toFixed(4), `guess-the-base-rate: ${pm.brier_base.toFixed(4)}`),
+      stat("Skill vs. base rate", pm.skill == null ? "–" : (pm.skill * 100).toFixed(1) + "%", "above 0% = better than the baseline"),
+      stat("Expected vs. actual", `${pm.expected.toFixed(0)} / ${pm.actual}`, "sum of probabilities vs. what happened")),
+    h("p", { class: "muted small" }, "Calibration: of the teams given a probability in each range, how many actually did it. Bars that match the average prediction mean the odds are honest."),
+    table([{ label: "Predicted range", left: true, render: (r) => r.range }, { label: "Cases", render: (r) => r.n }, { label: "Avg predicted", render: (r) => pct(r.pred) },
+      { label: "Actually happened", render: (r) => bar(r.actual) }], pm.bins));
+}
+
+function replayView(r) {
+  const s = r.strength, m = r.matches, adv = r.advancement || {};
+  const parts = [h("h2", {}, `Replay of ${r.year}`),
+    h("p", { class: "muted" }, `The exact pipeline used for the live forecast was run as if it were the ${r.year} preseason: trained only on seasons through ${r.trained_through} (model: ${r.rating_model}; analog weight ${r.analog_weight}), no ${r.year} match results, random qualification schedules. Everything below compares that to what really happened.`)];
+  if (s) parts.push(h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Team strength forecasts"),
+    h("p", { class: "muted small" }, `Forecast ${r.year} rating vs. the rating each team actually earned (teams with 8+ matches; rating = sd above the season average). Lower error is better.`),
+    h("div", { class: "grid" }, stat("Our forecast", s.rmse_forecast.toFixed(3), "RMSE"), stat("Same as last year", s.rmse_persistence.toFixed(3), "RMSE"), stat("Always average", s.rmse_always_average.toFixed(3), "RMSE"),
+      stat("80% range hit rate", pct(s.coverage_10_90, 0), "ideal: 80%"), stat("Rank correlation", s.spearman.toFixed(2), `${s.n} teams`)),
+    Object.keys(s.by_age).length ? table([{ label: "Team age", left: true, render: (x) => x[0] }, { label: "Teams", render: (x) => x[1].n }, { label: "Our forecast", render: (x) => x[1].forecast.toFixed(3) },
+      { label: "Same as last year", render: (x) => x[1].persistence.toFixed(3) }], byAge(s.by_age)) : null));
+  if (m) parts.push(h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "Match predictions from preseason strengths only"),
+    h("div", { class: "grid" }, stat("Accuracy", pct(m.accuracy), `${m.n.toLocaleString()} qualification matches`), stat("Log loss", m.logloss.toFixed(4), `coin flip: ${m.logloss_coinflip.toFixed(4)}`),
+      m.inseason_logloss != null ? stat("With in-season ratings", m.inseason_logloss.toFixed(4), `accuracy ${pct(m.inseason_accuracy)}`) : null)));
+  if (r.events) { parts.push(probCard("Event winners", r.events.win, `${r.events.events} events with a decided final. Each team's chance of being on the winning alliance.`),
+    probCard("Event finalists", r.events.finalist, "Each team's chance of reaching the finals.")); }
+  const note = (x) => (x ? null : "No Championship / district championship rosters were found for this season, so this can't be scored.");
+  parts.push(probCard("Making the District Championship", adv.dcmp, note(adv.dcmp)), probCard("Making Worlds (district teams)", adv.cmp_district, note(adv.cmp_district)),
+    probCard("Making Worlds (regional teams)", adv.cmp_regional, note(adv.cmp_regional)));
+  if ((adv.slots || []).length) parts.push(h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "District slot check"),
+    h("p", { class: "muted small" }, "Expected number of teams (sum of probabilities) vs. teams that actually appeared at the District Championship / Worlds. Attendance is a proxy for qualification: it ignores declines and waitlist moves."),
+    table([{ label: "District", left: true, render: (x) => x.district }, { label: "Teams", render: (x) => x.teams }, { label: "DCMP exp / actual", render: (x) => `${x.dcmp_expected} / ${x.dcmp_actual ?? "–"}` },
+      { label: "Worlds exp / actual", render: (x) => `${x.cmp_expected} / ${x.cmp_actual ?? "–"}` }, { label: "Worlds slots (rule)", render: (x) => x.cmp_slots_rule }], adv.slots)));
+  return parts;
+}
+
+async function viewScorecard() {
+  app.replaceChildren(h("h1", {}, "Scorecard"), h("p", { class: "muted" }, "Loading…"));
+  let sc;
+  try { sc = await fetch("data/scorecard.json").then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }); } catch (e) { return app.replaceChildren(h("h1", {}, "Scorecard"), h("p", { class: "muted" }, "No scorecard data yet.")); }
+  const parts = [h("h1", {}, "Scorecard: how accurate are the predictions?"),
+    h("p", { class: "muted" }, "Predictions are only useful if they hold up. This page replays the previous season as if it were still to come and scores the forecasts against reality, and (once the season starts) scores the live forecast as events finish.")];
+  if (sc.live) {
+    const l = sc.live;
+    parts.push(h("h2", {}, `Live: ${l.year} season so far`), l.matches ? h("div", { class: "card" }, h("div", { class: "grid" }, stat("Match accuracy", pct(l.matches.accuracy), `${l.matches.n.toLocaleString()} matches`), stat("Log loss", l.matches.logloss.toFixed(4), `coin flip: ${l.matches.logloss_coinflip.toFixed(4)}`))) : null,
+      l.events && l.events.events ? probCard("Event winners so far", l.events.win, `${l.events.events} completed events.`) : null);
+  }
+  (sc.replays || []).forEach((r) => parts.push(...replayView(r)));
+  if (!(sc.replays || []).length) parts.push(h("p", { class: "muted" }, "No replay available (needs at least six past seasons of data)."));
+  app.replaceChildren(...parts.filter(Boolean));
 }
 
 // ---------- router
@@ -284,6 +355,7 @@ function route() {
     else if (seg[0] === "advancement") viewAdvancement();
     else if (seg[0] === "predict") viewPredict();
     else if (seg[0] === "model") viewModel();
+    else if (seg[0] === "scorecard") viewScorecard();
     else viewRankings();
   } catch (err) { app.replaceChildren(h("p", { class: "neg" }, "Something went wrong: " + err.message)); console.error(err); }
 }
