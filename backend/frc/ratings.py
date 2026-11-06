@@ -333,17 +333,27 @@ def _mk(kind):
 MODELS = {"elo": Elo, "elo_plain": PlainElo, "ac_elo": ACElo, "epa": EPA, "bt": BT,
           "pridge": _mk("pridge"), "ropr": _mk("ropr"), "wopr": _mk("wopr"), "lasso": _mk("lasso"), "dpr": _mk("dpr")}
 
+# Hyperparameters were tuned by random search + local refinement on seasons 2016-2023 (mean per-year log loss),
+# then checked on 2024-2026, which the search never saw. The tuned points come first; a few of the original
+# points stay so model selection can still fall back to them if the data changes character. Notable shifts:
+# much longer carry-over between seasons (0.5-0.7 -> 0.85 for pridge) and far larger Elo / EPA learning rates.
 GRID = {
-    "elo": [{"k": k, "carry": c} for k in (6, 12, 20) for c in (0.5, 0.7)],
+    "elo": [{"k": 84, "carry": 0.75}, {"k": 60, "carry": 0.8}, {"k": 20, "carry": 0.7}],
     "elo_plain": [{"k": k, "carry": 0.7} for k in (12, 24)],
     "ac_elo": [{"k": k, "boost": 2.0, "carry": 0.7} for k in (5, 10)],
-    "epa": [{"carry": c, "lr0": l} for c in (0.5, 0.7) for l in (0.3, 0.6)],
+    "epa": [{"carry": 0.46, "lr0": 1.47, "lr_min": 0.18, "prior_n": 2.9},
+            {"carry": 0.63, "lr0": 1.19, "lr_min": 0.116, "prior_n": 2.3},
+            {"carry": 0.5, "lr0": 0.6}],
     "bt": [{"lr": l, "carry": c} for l in (0.04, 0.08) for c in (0.5, 0.7)],
-    "pridge": [{"lam": l, "carry": c} for l in (3.0, 8.0) for c in (0.5, 0.7)],
-    "ropr": [{"lam": l} for l in (1.5, 5.0)],
+    "pridge": [{"lam": 2.8, "carry": 0.86, "eta": 0.92, "decay": 0.987, "every": 4},
+               {"lam": 2.4, "carry": 0.844, "eta": 0.917, "decay": 0.982, "every": 4},
+               {"lam": 3.0, "carry": 0.7}],
+    "ropr": [{"lam": 1.5}, {"lam": 2.0}],
     "wopr": [{"lam": l, "decay": 0.96} for l in (1.5, 5.0)],
     "lasso": [{"alpha": a} for a in (0.004, 0.012)],
-    "dpr": [{"lam": l, "carry": 0.7} for l in (4.0, 10.0)],
+    "dpr": [{"lam": 5.8, "carry": 0.65, "eta": 0.835, "decay": 1.0},
+            {"lam": 5.4, "carry": 0.63, "eta": 0.86, "decay": 0.998},
+            {"lam": 4.0, "carry": 0.7}],
 }
 
 

@@ -17,6 +17,13 @@ def cut(data, before):
             "event_teams": {k: v for k, v in data["event_teams"].items() if k in keys}}
 
 
+# calibrate_beta fits on end-of-season strengths (no uncertainty), but the simulator runs on preseason forecasts
+# that are noisier. Fitting beta directly on preseason-forecast match outcomes gave 1.2-1.4x the production value
+# (1.107), and an end-to-end replay of 2025 and 2026 confirmed it: x1.25 lowered match log loss in both
+# (0.5335 -> 0.5306, 0.5200 -> 0.5176) while x0.8 raised it.
+BETA_SCALE = 1.25
+
+
 def calibrate_beta(data, z_by_year, years):
     """P(red wins) = sigmoid(beta * (sum z_red - sum z_blue)), z = end-of-season standardised strength."""
     X, y = [], []
@@ -54,7 +61,7 @@ def build_forecast(data, target, rules, nsims=400, log=print, use_schedules=True
     w = fb["blend"]["analog_weight"] if fb else 0.4
     fc = forecast.predict_next(z, target, blend_w=w, rookie=rookie)
     rk_prior = forecast.rookie_prior(z, rookie)
-    beta = calibrate_beta(train, z, test_years)
+    beta = calibrate_beta(train, z, test_years) * BETA_SCALE
 
     tevents = [e for e in data["events"] if e["year"] == target]
     tteams = {t for e in tevents for t in data["event_teams"].get(e["key"], [])}

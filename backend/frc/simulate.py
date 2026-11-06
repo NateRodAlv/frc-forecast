@@ -38,10 +38,17 @@ def age_points(year, rookie_year):
     return 10 if rookie_year == year else (5 if rookie_year == year - 1 else 0)
 
 
+# Playoff matches are decided more by the better alliance than the qualification-calibrated beta implies
+# (backtested on the 2025 and 2026 replays: win skill 0.138 -> 0.142 and 0.133 -> 0.135, no change elsewhere;
+# 2.0 gave only slightly more). Applied on top of beta inside the bracket only.
+PLAYOFF_SHARPEN = 1.5
+
+
 def play_bracket(SA, beta, u):
     """SA: strengths of 8 alliances (seed order). u: >=20 uniforms.
     Returns (winner, finalist, third, fourth, finals_wins_winner, finals_wins_finalist)."""
     k = [0]
+    beta = beta * PLAYOFF_SHARPEN
 
     def play(a, b):
         p = 1.0 / (1.0 + math.exp(-beta * (SA[a] - SA[b])))
