@@ -42,7 +42,13 @@ def load_real(start, target, log):
     for y in range(start, target + 1):
         if y in forecast.SKIP_YEARS:
             continue
-        evs = api.events(y)
+        try:
+            evs = api.events(y)
+        except RuntimeError:
+            raise
+        except Exception as ex:                         # an old season TBA can't serve must not sink the refresh
+            log(f"{y}: skipped ({type(ex).__name__}: {ex})")
+            continue
         log(f"{y}: {len(evs)} events")
         for e in evs:
             data["events"].append(e)
@@ -84,6 +90,27 @@ def load_real(start, target, log):
 
 
 
+REPLAY_CACHE = ROOT / "data" / "replay_cache"
+
+
+def replay_fingerprint(y, data, rules, nsims, main):
+    """Everything a replay of season y depends on: the code, the rules, nsims, the data through y, and the final
+    ratings/selection used to define 'actual' strength. Unchanged => the saved scored replay is exactly reusable."""
+    import hashlib
+    h = hashlib.sha256()
+    for f in sorted((ROOT / "backend").rglob("*.py")):
+        h.update(f.read_bytes())
+    h.update(json.dumps([rules, nsims, y], sort_keys=True, default=str).encode())
+    keys = sorted(e["key"] for e in data["events"] if e["year"] <= y)
+    h.update(json.dumps([[e["key"], e["type"], e["district"], e["start"]] for e in data["events"] if e["year"] <= y], sort_keys=True).encode())
+    for k in keys:
+        h.update(json.dumps([data["matches"].get(k), data["event_teams"].get(k)], default=str).encode())
+    h.update(json.dumps([sorted((data.get("rookie") or {}).items())], default=str).encode())
+    h.update(json.dumps([main["sel"].get("selected"), sorted((t, round(v, 9)) for t, v in main["z"].get(y, {}).items()),
+                         sorted(main["counts"].get(y, {}).items())], default=str).encode())
+    return h.hexdigest()
+
+
 def alias_map(rules):
     out = {}
     for k, d in rules["districts"].items():
@@ -104,11 +131,11 @@ def make_scorecard(rep, data, main, rules):
     # Score only what the simulator models for that season: the playoff format changed in 2023, and the advancement
     # rules in rules.json are one season's manual. Anything else is reported as not scored, with the reason.
     not_scored = {}
-    if year >= pipeline.DOUBLE_ELIM_FROM:
-        events = score.score_events(year, data, rep["season"]["events"])
-    else:
+    fmt = "double" if year >= pipeline.DOUBLE_ELIM_FROM else "single8"
+    events = score.score_events(year, data, rep["season"]["events"], fmt)
+    if not events["events"]:
         events = None
-        not_scored["events"] = f"the simulator models the double-elimination playoffs used from {pipeline.DOUBLE_ELIM_FROM}; {year} used a different format"
+        not_scored["events"] = f"no {year} event had a completed {'double' if fmt == 'double' else 'best-of-3 single'}-elimination bracket in the data"
     if year in rules.get("scorecard_advancement_years", []):
         advancement = score.score_advancement(year, data, rep["season"], alias_map(rules))
     else:
@@ -144,12 +171,14 @@ def replayable_years(played_years, target, min_seasons, only=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target-year", type=int, default=2027)
-    ap.add_argument("--start-year", type=int, default=2016)
+    ap.add_argument("--start-year", type=int, default=2002,
+                    help="first season to load (2002 is the earliest TBA has match data for; seasons it lacks are just skipped)")
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--nsims", type=int, default=400)
     ap.add_argument("--no-replay", action="store_true", help="skip the past-season replays / scorecard")
     ap.add_argument("--replay-min-seasons", type=int, default=4,
                     help="replay every past season that has at least this many earlier played seasons to learn from")
+    ap.add_argument("--no-replay-cache", action="store_true", help="ignore saved replay results")
     ap.add_argument("--replay-years", default="", help="comma-separated seasons to replay (default: all eligible)")
     a = ap.parse_args()
     log = lambda *x: print(*x, flush=True)  # noqa
@@ -205,16 +234,28 @@ def main():
         only = {int(x) for x in a.replay_years.split(",") if x.strip()} or None
         todo, scorecard["skipped"] = replayable_years(played_years, a.target_year, a.replay_min_seasons, only)
         for y in todo:
-            log(f"=== replay: forecasting {y} using only seasons before it ===")
+            fp = None if a.synthetic or a.no_replay_cache else replay_fingerprint(y, data, rules, a.nsims, M)
+            cf = REPLAY_CACHE / f"{y}.json"
             try:
+                if fp and cf.exists():
+                    saved = json.loads(cf.read_text())
+                    if saved.get("fingerprint") == fp:
+                        log(f"=== replay {y}: unchanged inputs, reusing saved result ===")
+                        scorecard["replays"].append(saved["scorecard"])
+                        continue
+                log(f"=== replay: forecasting {y} using only seasons before it ===")
                 rep = pipeline.build_forecast(data, y, rules, a.nsims, log, use_schedules=False, seed=2)
-                scorecard["replays"].append(make_scorecard(rep, data, M, rules))
+                sc = make_scorecard(rep, data, M, rules)
+                scorecard["replays"].append(sc)
+                if fp:
+                    REPLAY_CACHE.mkdir(parents=True, exist_ok=True)
+                    cf.write_text(json.dumps({"fingerprint": fp, "scorecard": sc}, default=jdefault))
             except Exception as ex:  # one bad season must not sink the whole refresh
                 log(f"replay of {y} failed:\n{traceback.format_exc()}")
                 scorecard["skipped"].append({"year": y, "reason": f"replay failed: {type(ex).__name__}: {ex}"})
         scorecard["skipped"].sort(key=lambda s: s["year"])
         scorecard["pooled"] = score.pool_replays(scorecard["replays"])
-    live_ev = score.score_events(a.target_year, data, season["events"])
+    live_ev = score.score_events(a.target_year, data, season["events"], "double")
     live_m = score.score_matches(a.target_year, data, strengths, beta)
     if live_ev["events"] or live_m:
         scorecard["live"] = {"year": a.target_year, "events": live_ev, "matches": live_m}
@@ -261,7 +302,7 @@ def main():
                 "country": e.get("country"), "n_teams": len(data["event_teams"].get(e["key"], [])),
                 "has_schedule": e["key"] in sched, "sim": season["events"].get(e["key"])}
                for e in data["events"] if e["year"] >= (cur_year or a.target_year)]
-    meta = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "target_year": a.target_year,
+    meta = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "target_year": a.target_year, "double_elim_from": pipeline.DOUBLE_ELIM_FROM,
             "synthetic": a.synthetic, "best_rating_model": model_label, "selected_model": selected,
             "rating_leaderboard": sel["board"], "test_years": test_years, "forecast_backtest": fb,
             "blend_analog_weight": w, "beta": beta, "nsims": a.nsims, "warnings": warnings,

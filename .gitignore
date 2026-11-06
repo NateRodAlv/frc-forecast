@@ -3,3 +3,4 @@ site/data/
 __pycache__/
 .pytest_cache/
 .vscode/
+data/replay_cache/

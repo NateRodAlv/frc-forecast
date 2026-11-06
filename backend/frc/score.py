@@ -43,15 +43,34 @@ def finals_outcome(matches):
     return teams[w], teams["blue" if w == "red" else "red"]
 
 
-def score_events(year, data, season_events):
-    """Event win / finalist probabilities vs actual finals results."""
+def playoff_format(matches):
+    """'single8' (best-of-3 single elimination, 8 alliances: quarterfinal sets 1-4, semifinal sets 1-2, final),
+    'double' (double elimination: semifinal sets beyond 2), or 'other' / None when there are no playoff matches.
+    Decided from the match records themselves so a season is only scored when the simulated bracket matches what was played."""
+    sets = {(m["lvl"], m["set"]) for m in matches if m["lvl"] in ("qf", "sf", "f")}
+    if not sets:
+        return None
+    if any(l == "sf" and s > 2 for l, s in sets):
+        return "double"
+    if {s for l, s in sets if l == "qf"} == {1, 2, 3, 4} and {s for l, s in sets if l == "sf"} == {1, 2}:
+        return "single8"
+    return "other"
+
+
+def score_events(year, data, season_events, fmt):
+    """Event win / finalist probabilities vs actual finals results, over events whose played bracket is `fmt`
+    (the format the simulator used for that season). Events with another format are counted in `skipped_format`."""
     pw, ow, pf, of = [], [], [], []
-    n_ev = 0
+    n_ev = skipped = 0
     for e in data["events"]:
         sim = season_events.get(e["key"])
         if e["year"] != year or not sim:
             continue
-        res = finals_outcome(data["matches"].get(e["key"], []))
+        ms = data["matches"].get(e["key"], [])
+        if playoff_format(ms) != fmt:
+            skipped += playoff_format(ms) is not None
+            continue
+        res = finals_outcome(ms)
         if not res:
             continue
         n_ev += 1
@@ -59,7 +78,7 @@ def score_events(year, data, season_events):
         for t, v in sim["teams"].items():
             pw.append(v["p_win"]); ow.append(1.0 if int(t) in win else 0.0)
             pf.append(v["p_finalist"]); of.append(1.0 if int(t) in win or int(t) in lose else 0.0)
-    return {"events": n_ev, "win": prob_metrics(pw, ow), "finalist": prob_metrics(pf, of)}
+    return {"events": n_ev, "skipped_format": skipped, "format": fmt, "win": prob_metrics(pw, ow), "finalist": prob_metrics(pf, of)}
 
 
 def score_matches(year, data, strengths, beta, inseason_p=None):

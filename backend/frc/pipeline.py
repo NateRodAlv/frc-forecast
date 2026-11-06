@@ -28,8 +28,7 @@ BETA_SCALE = 1.25
 # looking at the 2025 and 2026 replays, so those two are not a clean test of those two settings.
 TUNED_THROUGH = 2023
 SCALE_FACTORS_CHOSEN_WITH = (2025, 2026)
-# The simulator models the double-elimination playoffs introduced in 2023; earlier formats were different.
-DOUBLE_ELIM_FROM = 2023
+DOUBLE_ELIM_FROM = simulate.DOUBLE_ELIM_FROM   # playoff format the simulator uses per season (single elimination before)
 
 
 def calibrate_beta(data, z_by_year, years):

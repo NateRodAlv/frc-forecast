@@ -11,6 +11,9 @@ Team rankings, next-season trend forecasts, match / event predictions and advanc
 4. Settings → *Pages* → Source: **GitHub Actions**.
 5. Actions tab → run **Refresh data and deploy site**. It then re-runs every 3 hours by itself.
 
+Replays are cached in `data/replay_cache` (keyed by a fingerprint of the code, rules and data), so later refreshes only
+redo seasons whose inputs changed. The first run with the full history is the slow one (`--start-year` sets how far back to load).
+
 Optional repo variable `TARGET_YEAR` (default 2027) changes which season is forecast.
 TBA responses are cached with ETags, so refreshes after the first mostly receive HTTP 304.
 
@@ -20,7 +23,7 @@ TBA responses are cached with ETags, so refreshes after the first mostly receive
 | Fetch | `backend/frc/tba.py` | TBA v3: events, matches, rosters, awards, teams |
 | Rank | `backend/frc/ratings.py` | 10 candidates (margin Elo, plain Elo, AC-Elo, EPA-style, Bradley-Terry, pRidge, rOPR, wOPR, Lasso OPR, defence-augmented ridge). Each is tuned on early seasons only and scored by walk-forward backtest on the latest 3. A stacked ensemble of the best few is used **only if it beats every single model**. |
 | Trend forecast | `backend/frc/forecast.py` | Each team = a "price series" of yearly strength z-scores. Ridge (mean reversion + momentum) blended with **analog matching**: finds other teams whose past trajectory had the same shape (slump → rebound, breakout, decline) and uses what they did next. Blend weight set by backtest. |
-| Simulate | `backend/frc/simulate.py` | Monte Carlo: quals → alliance selection → double-elim → district/regional points → DCMP → Worlds slots |
+| Simulate | `backend/frc/simulate.py` | Monte Carlo: quals → alliance selection → playoffs (best-of-3 single elim through 2022, double elim from 2023) → district/regional points → DCMP → Worlds slots |
 | Rules | `config/rules.json` | District slots, DCMP capacities, point values (2026 manual) |
 | Site | `site/` | Rankings, team pages, events, match predictor, advancement, model report |
 
@@ -29,7 +32,7 @@ Local preview without a key: `python backend/run.py --synthetic && cd site && py
 
 ## Forecast accuracy: the Scorecard tab
 Every run replays **every past season that has enough history** (at least `--replay-min-seasons`, default 4, earlier played
-seasons; with the 2016-2019 and 2022+ data that is 2022 onward) as if it were still to come: the **same production code**
+seasons; history is loaded from 2002, the earliest season TBA has matches for, so that is nearly every season since 2006) as if it were still to come: the **same production code**
 (`pipeline.build_forecast`) is trained on seasons before it only, forecasts it with random qualification schedules, and the
 results are scored against what really happened: team strength error vs. "same as last year", preseason match accuracy,
 event-winner/finalist calibration, and District Championship and Worlds odds. The tab shows one pooled summary, a
@@ -41,8 +44,9 @@ Deliberately **not** reported: expected-vs-actual counts (sum of probabilities v
 Worlds). The simulator fills each event's three winning slots and each district's allocation exactly, so those match by
 construction and say nothing about accuracy; calibration bins and Brier skill measure whether the right teams were picked.
 
-What each season is scored on is limited to what the simulator models: event winners/finalists from 2023 (double-elimination
-playoffs; earlier formats differed), District Championship / Worlds odds only for seasons listed in
+What each season is scored on is limited to what the simulator models: event winners/finalists for every season, using that
+season's real playoff format (best-of-3 single elimination through 2022, double elimination from 2023; an event is scored only
+if its recorded bracket has that shape, detected from the match data), District Championship / Worlds odds only for seasons listed in
 `scorecard_advancement_years` in `config/rules.json` (currently 2026, the manual transcribed there). Add a year only after
 transcribing its allocations.
 

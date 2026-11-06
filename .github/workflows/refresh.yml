@@ -31,7 +31,9 @@ jobs:
       - name: Restore TBA response cache (ETags)
         uses: actions/cache/restore@v4
         with:
-          path: data/cache
+          path: |
+            data/cache
+            data/replay_cache
           key: tba-cache-${{ github.run_id }}
           restore-keys: tba-cache-
       - name: Build model + site data
@@ -42,7 +44,9 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: data/cache
+          path: |
+            data/cache
+            data/replay_cache
           key: tba-cache-${{ github.run_id }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

@@ -257,9 +257,9 @@ def test_scoring_helpers():
     assert score.finals_outcome([mk("f", 1, 10, 5), mk("f", 2, 4, 9), mk("f", 3, 8, 2)]) == ({1, 2, 3}, {4, 5, 6})
     assert score.finals_outcome([mk("f", 1, 10, 5)]) is None                              # undecided
     ev = {"year": 2026, "key": "e", "type": 1}
-    data = {"events": [ev], "matches": {"e": [mk("f", 1, 10, 5), mk("f", 2, 9, 3)]}}
+    data = {"events": [ev], "matches": {"e": [mk("sf", 1, 1, 0), mk("sf", 1, 1, 0)] + [dict(mk("sf", 1, 1, 0), set=n) for n in (3, 13)] + [mk("f", 1, 10, 5), mk("f", 2, 9, 3)]}}
     sim = {"e": {"teams": {str(t): {"p_win": 0.5 if t <= 3 else 0.0, "p_finalist": 1.0 if t <= 6 else 0.0} for t in range(1, 25)}}}
-    r = score.score_events(2026, data, sim)
+    r = score.score_events(2026, data, sim, "double")
     assert r["events"] == 1 and round(r["win"]["base_rate"] * r["win"]["n"]) == 3
 
 
@@ -304,3 +304,25 @@ def test_replayable_years():
     assert set(reasons) == {2016, 2017, 2018, 2019, 2020, 2021} and "COVID" in reasons[2020] and "0 earlier" in reasons[2016]
     assert run.replayable_years(played, 2027, 4, only={2025})[0] == [2025]
     assert run.replayable_years(played, 2026, 4)[0] == [2022, 2023, 2024, 2025]          # never replays the target or later
+
+
+def test_single_elimination_bracket_and_format_detection():
+    from frc import score, simulate
+    rng = np.random.default_rng(5)
+    SA = np.array([3.0, 2.0, 1.5, 1.0, 0.5, 0.0, -0.5, -1.0])
+    wins = np.zeros(8); fin = np.zeros(8); n = 4000
+    for _ in range(n):
+        w, f, th, fo, ww, wf = simulate.play_bracket_single(SA, 0.8, rng.random(24))
+        assert len({w, f, th, fo}) == 4 and ww == 2 and wf in (0, 1)
+        wins[w] += 1; fin[w] += 1; fin[f] += 1
+    assert wins[0] > wins[3] > wins[7] and abs(wins.sum() - n) < 1e-9 and abs(fin.sum() - 2 * n) < 1e-9
+    mk = lambda lvl, st: {"lvl": lvl, "set": st, "num": 1, "red": [1, 2, 3], "blue": [4, 5, 6], "rs": 1, "bs": 0}
+    single = [mk("qf", i) for i in (1, 2, 3, 4)] + [mk("sf", 1), mk("sf", 2), mk("f", 1)]
+    assert score.playoff_format(single) == "single8"
+    assert score.playoff_format(single + [mk("sf", 9)]) == "double"
+    assert score.playoff_format([mk("qf", 1), mk("f", 1)]) == "other" and score.playoff_format([]) is None
+    ev = {"year": 2019, "key": "e", "type": 1}
+    data = {"events": [ev], "matches": {"e": single + [dict(mk("f", 1), rs=9), dict(mk("f", 1), rs=9)]}}
+    sim = {"e": {"teams": {str(t): {"p_win": 0.5, "p_finalist": 1.0} for t in range(1, 7)}}}
+    assert score.score_events(2019, data, sim, "double")["events"] == 0                    # wrong format is not scored
+    assert score.score_events(2019, data, sim, "single8")["events"] == 1

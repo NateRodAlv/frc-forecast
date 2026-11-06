@@ -43,6 +43,36 @@ def age_points(year, rookie_year):
 # 2.0 gave only slightly more). Applied on top of beta inside the bracket only.
 PLAYOFF_SHARPEN = 1.5
 
+# Playoffs were 8 alliances in a best-of-three single-elimination bracket until 2022 and double elimination from 2023
+# (FIRST's 2023 announcement; the bracket tree below was checked against TBA 2016-2022 elimination matches: a
+# quarterfinal winner never appeared in the wrong semifinal in ~760 events).
+DOUBLE_ELIM_FROM = 2023
+
+
+def play_bracket_single(SA, beta, u):
+    """Best-of-three single elimination. SA: strengths of 8 alliances (seed order). u: >=21 uniforms.
+    QF1 1v8, QF2 4v5, QF3 2v7, QF4 3v6; SF1 = QF1 winner v QF2 winner, SF2 = QF3 winner v QF4 winner; then the final.
+    Same return shape as play_bracket; the two semifinal losers (tied for third) are ordered by strength."""
+    k = [0]
+    beta = beta * PLAYOFF_SHARPEN
+
+    def series(a, b):
+        p = 1.0 / (1.0 + math.exp(-beta * (SA[a] - SA[b])))
+        wa = wb = 0
+        while wa < 2 and wb < 2:
+            if u[k[0]] < p:
+                wa += 1
+            else:
+                wb += 1
+            k[0] += 1
+        return (a, b, wa, wb) if wa == 2 else (b, a, wb, wa)
+
+    q1, _, _, _ = series(0, 7); q2, _, _, _ = series(3, 4); q3, _, _, _ = series(1, 6); q4, _, _, _ = series(2, 5)
+    s1w, s1l, _, _ = series(q1, q2); s2w, s2l, _, _ = series(q3, q4)
+    w, f, ww, wf = series(s1w, s2w)
+    third, fourth = (s1l, s2l) if SA[s1l] >= SA[s2l] else (s2l, s1l)
+    return w, f, third, fourth, ww, wf
+
 
 def play_bracket(SA, beta, u):
     """SA: strengths of 8 alliances (seed order). u: >=20 uniforms.
@@ -74,8 +104,9 @@ def play_bracket(SA, beta, u):
     return b, a, l13, l12, wb, wa
 
 
-def alliances_and_playoffs(order, S, beta, pick_noise, u, award_pts):
-    """order: team indices by qualification rank. S: strengths (indexable by team idx).
+def alliances_and_playoffs(order, S, beta, pick_noise, u, award_pts, single=False):
+    """order: team indices by qualification rank. S: strengths (indexable by team idx). single: best-of-three single
+    elimination (seasons before DOUBLE_ELIM_FROM) instead of the double-elimination bracket.
     Returns per-team dict: as_pts, po_pts, and winner/finalist alliance members (team idx lists)."""
     caps = list(order[:8])
     capset = set(caps)
@@ -92,7 +123,7 @@ def alliances_and_playoffs(order, S, beta, pick_noise, u, award_pts):
     for t, k in pickno.items():
         as_pts[t] = 17 - k
     SA = [sum(S[t] for t in a) for a in A]
-    w, f, th, fo, fw_w, fw_f = play_bracket(SA, beta, u)
+    w, f, th, fo, fw_w, fw_f = (play_bracket_single if single else play_bracket)(SA, beta, u)
     po = {}
     for t in A[w]:
         po[t] = 20 + min(10, 5 * fw_w)
@@ -110,6 +141,7 @@ class Sim:
         self.rules, self.beta, self.m = rules, beta, nsims
         self.rng = np.random.default_rng(seed)
         self.mpt = matches_per_team
+        self.single_elim = False          # set per season by run_season (playoff format changed in 2023)
         dp, rp = rules["district_points"], rules["regional_points"]
         self.dp_awards, self.rg_awards = dp["awards"], rp["awards"]
         self.alias = {}
@@ -192,7 +224,7 @@ class Sim:
         pnoise = rng.normal(0, 0.3, (n, m))
         U = rng.random((m, 24))
         for s in range(m):
-            a, p, w, f = alliances_and_playoffs(order[:, s], S[:, s], beta, pnoise[:, s], U[s], None)
+            a, p, w, f = alliances_and_playoffs(order[:, s], S[:, s], beta, pnoise[:, s], U[s], None, self.single_elim)
             for t, v in a.items():
                 as_pts[t, s] = v
             for t, v in p.items():
@@ -215,7 +247,7 @@ class Sim:
         order = np.argsort(-(s_loc + rng.normal(0, 0.9, n)))
         rank = np.empty(n, int); rank[order] = np.arange(1, n + 1)
         q = qual_points(rank, n)
-        a, p, w, f = alliances_and_playoffs(order, s_loc, self.beta, rng.normal(0, 0.3, n), rng.random(24), None)
+        a, p, w, f = alliances_and_playoffs(order, s_loc, self.beta, rng.normal(0, 0.3, n), rng.random(24), None, self.single_elim)
         pts = q.copy()
         for t, v in a.items():
             pts[t] += v
@@ -228,6 +260,7 @@ class Sim:
 def run_season(sim, year, events, event_teams, strengths, rookie_years, schedules=None, log=print):
     """strengths: team -> (mean, sd) in z units. Returns output dict (JSON-able)."""
     rules, m, rng = sim.rules, sim.m, sim.rng
+    sim.single_elim = year < DOUBLE_ELIM_FROM
     schedules = schedules or {}
     all_teams = sorted({t for e in events for t in event_teams.get(e["key"], [])})
     tid = {t: i for i, t in enumerate(all_teams)}

@@ -205,7 +205,7 @@ function viewEvent(key) {
   if (e.sim) {
     const rows = Object.entries(e.sim.teams).map(([t, v]) => ({ team: +t, ...v })).sort((a, b) => b.p_win - a.p_win);
     parts.push(h("h2", {}, "Event prediction"), h("p", { class: "muted small" }, e.sim.scheduled ? "Uses the published qualification schedule." : "Qualification schedule not published yet: uses random balanced schedules.",
-      " Assumes the standard 8-alliance double-elimination bracket."),
+      ` Assumes the standard 8-alliance bracket (${e.year >= (S.meta.double_elim_from || 2023) ? "double elimination" : "best-of-3 single elimination, the format before 2023"}).`),
       table([{ label: "Team", left: true, render: (r) => h("span", {}, teamLink(r.team), " ", h("span", { class: "muted small" }, tname(r.team))) },
         { label: "Win event", render: (r) => bar(r.p_win) }, { label: "Finalist", render: (r) => pct(r.p_finalist) }, { label: "Top 8 seed", render: (r) => pct(r.p_top8) },
         { label: "Exp. rank", render: (r) => r.exp_rank }, { label: "Exp. points", render: (r) => r.exp_pts }], rows));
@@ -282,7 +282,7 @@ function viewModel() {
       h("ul", {}, (m.not_included || []).map((x) => h("li", {}, h("b", {}, x.model + ": "), x.why)))),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "4. Assumptions"),
       h("ul", {}, h("li", {}, m.normalization), h("li", {}, m.rules_note), h("li", {}, m.game_note), h("li", {}, `${m.nsims} Monte Carlo simulations per run; each draws one strength per team and reuses it across all that team's events.`),
-        h("li", {}, "Playoffs assume 8 alliances, double elimination (matches 1–13) then best-of-3 finals. Offseason events vary and are shown for strength only."))));
+        h("li", {}, "Playoffs assume 8 alliances: best-of-3 single elimination through 2022, double elimination (matches 1–13) then best-of-3 finals from 2023. Offseason events vary and are shown for strength only."))));
 }
 
 
@@ -324,7 +324,7 @@ function replayView(r) {
   if (r.strength) parts.push(strengthCard(r.strength, `Forecast ${r.year} rating vs. the rating each team actually earned (teams with 8+ matches; rating = sd above the season average). Lower error is better.`));
   if (r.matches) parts.push(matchCard(r.matches));
   const adv = r.advancement || {};
-  if (r.events) parts.push(probCard("Event winners", r.events.win, `${r.events.events} events with a decided final. Each team's chance of being on the winning alliance.`), probCard("Event finalists", r.events.finalist, "Each team's chance of reaching the finals."));
+  if (r.events) parts.push(probCard("Event winners", r.events.win, `${r.events.events} events with a decided final${r.events.skipped_format ? ` (${r.events.skipped_format} more left out: a different bracket shape)` : ""}. Each team's chance of being on the winning alliance.`), probCard("Event finalists", r.events.finalist, "Each team's chance of reaching the finals."));
   else parts.push(h("div", { class: "card" }, h2("Event winners and finalists"), h("p", { class: "muted" }, `Not scored: ${ns.events || "no data"}.`)));
   if (r.advancement) {
     const note = "No Championship / district championship rosters were found for this season, so this can't be scored.";
@@ -385,7 +385,7 @@ async function viewScorecard() {
     const notes = [
       h("li", {}, `A season is replayed only if at least ${n.min_seasons ?? 4} earlier seasons exist to learn from.` + ((sc.skipped || []).length ? " Not replayed: " + whyGroups(sc.skipped) + "." : "")),
       n.tuned_through != null ? h("li", {}, `Rating settings were tuned using seasons through ${n.tuned_through}, so earlier rows are partly in-sample and flatter the model. The match-sharpness and playoff factors were chosen by looking at ${yrs(n.scale_factors_chosen_with)}. The "Tuning" column marks which rows are clean.`) : null,
-      n.double_elim_from != null ? h("li", {}, `Event winners / finalists are scored from ${n.double_elim_from} on, the first season of double-elimination playoffs, which is the format the simulator models.`) : null,
+      n.double_elim_from != null ? h("li", {}, `Event winners / finalists are scored for every season, using the playoff format that season really used (best-of-3 single elimination before ${n.double_elim_from}, double elimination from then on). An event is scored only if its recorded bracket has that shape; events with a different bracket are left out, and each season's detail says how many.`) : null,
       n.advancement_years ? h("li", {}, `District Championship / Worlds odds are scored only for seasons whose advancement rules are in config/rules.json (${yrs(n.advancement_years)}); replaying a season under another year's rules would measure the rules mismatch, not the model. Attendance stands in for qualification, so declines and waitlist moves are ignored.`) : null,
       h("li", {}, "Seasons with six or fewer earlier seasons can't backtest how much weight the analog-team model deserves, so they use a default blend weight of 0.4 (shown in each season's detail)."),
       h("li", {}, "Replays use each season's real event rosters, which are only approximately known in a real preseason.")];
