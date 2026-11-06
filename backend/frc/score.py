@@ -26,7 +26,7 @@ def prob_metrics(ps, os_):
             bins.append({"range": f"{lo*100:.0f}-{min(hi,1)*100:.0f}%", "n": int(m.sum()),
                          "pred": float(ps[m].mean()), "actual": float(os_[m].mean())})
     return {"n": n, "base_rate": base, "brier": brier, "brier_base": b0, "skill": (1 - brier / b0) if b0 > 0 else None,
-            "logloss": ll, "logloss_base": ll0, "expected": float(ps.sum()), "actual": float(os_.sum()), "bins": bins}
+            "logloss": ll, "logloss_base": ll0, "bins": bins}
 
 
 def finals_outcome(matches):
@@ -116,9 +116,10 @@ def score_strength(fc, z_actual, counts_actual, rookie, year, min_matches=8):
     return out
 
 
-def score_advancement(year, data, season, rules, alias):
+def score_advancement(year, data, season, alias):
     """District Championship / Worlds odds vs who actually showed up. Attendance is a proxy for qualification
-    (it ignores declines and waitlist moves)."""
+    (it ignores declines and waitlist moves). Per-district expected-vs-actual slot counts are deliberately not
+    reported: the simulator fills each district's allocation exactly, so they match by construction."""
     dcmp = {}
     for e in data["events"]:
         if e["year"] == year and e["type"] in (2, 5) and e.get("district"):
@@ -128,20 +129,84 @@ def score_advancement(year, data, season, rules, alias):
     cmp_ = {t for e in data["events"] if e["year"] == year and e["type"] in (3, 4) for t in data["event_teams"].get(e["key"], [])}
     have_dcmp, have_cmp = any(dcmp.values()), bool(cmp_)
     d_p, d_o, c_p, c_o, r_p, r_o = [], [], [], [], [], []
-    by_dist = {}
     for t, v in season["teams"].items():
         if v["model"] == "district":
             d_p.append(v["p_dcmp"]); d_o.append(1.0 if t in dcmp.get(v["district"], set()) else 0.0)
             c_p.append(v["p_cmp"]); c_o.append(1.0 if t in cmp_ else 0.0)
-            b = by_dist.setdefault(v["district"], {"dcmp_exp": 0.0, "dcmp_act": 0, "cmp_exp": 0.0, "cmp_act": 0, "teams": 0})
-            b["dcmp_exp"] += v["p_dcmp"]; b["dcmp_act"] += d_o[-1]; b["cmp_exp"] += v["p_cmp"]; b["cmp_act"] += c_o[-1]; b["teams"] += 1
         else:
             r_p.append(v["p_cmp"]); r_o.append(1.0 if t in cmp_ else 0.0)
-    slots = [{"district": rules["districts"][k]["name"], "teams": b["teams"], "dcmp_expected": round(b["dcmp_exp"], 1),
-              "dcmp_actual": int(b["dcmp_act"]) if have_dcmp else None, "cmp_expected": round(b["cmp_exp"], 1),
-              "cmp_actual": int(b["cmp_act"]) if have_cmp else None,
-              "cmp_slots_rule": rules["districts"][k]["cmp_slots"]} for k, b in sorted(by_dist.items())]
     return {"dcmp": prob_metrics(d_p, d_o) if have_dcmp else None,
             "cmp_district": prob_metrics(c_p, c_o) if have_cmp else None,
             "cmp_regional": prob_metrics(r_p, r_o) if have_cmp else None,
-            "slots": slots, "worlds_attendees_found": len(cmp_), "dcmp_rosters_found": sum(len(v) for v in dcmp.values())}
+            "worlds_attendees_found": len(cmp_), "dcmp_rosters_found": sum(len(v) for v in dcmp.values())}
+
+
+# ---- pooling: combine several seasons' scores into one summary --------------------------------------------------
+def _wmean(items, key):
+    n = sum(i["n"] for i in items)
+    return sum(i["n"] * i[key] for i in items) / n
+
+
+def pool_prob(pms):
+    """Pool prob_metrics() results from several seasons. Calibration bins merge exactly; Brier / log loss are
+    case-weighted means, and the skill baseline is the case-weighted mean of each season's own base-rate Brier."""
+    pms = [p for p in pms if p]
+    if not pms:
+        return None
+    n = sum(p["n"] for p in pms)
+    brier, b0 = _wmean(pms, "brier"), _wmean(pms, "brier_base")
+    merged = {}
+    for p in pms:
+        for b in p["bins"]:
+            m = merged.setdefault(b["range"], {"range": b["range"], "n": 0, "pred": 0.0, "actual": 0.0})
+            m["n"] += b["n"]; m["pred"] += b["n"] * b["pred"]; m["actual"] += b["n"] * b["actual"]
+    order = {f"{lo*100:.0f}-{min(hi,1)*100:.0f}%": i for i, (lo, hi) in enumerate(zip(BINS[:-1], BINS[1:]))}
+    bins = [{"range": r, "n": m["n"], "pred": m["pred"] / m["n"], "actual": m["actual"] / m["n"]}
+            for r, m in sorted(merged.items(), key=lambda kv: order.get(kv[0], 99))]
+    return {"n": n, "seasons": len(pms), "base_rate": _wmean(pms, "base_rate"), "brier": brier, "brier_base": b0,
+            "skill": (1 - brier / b0) if b0 > 0 else None, "logloss": _wmean(pms, "logloss"),
+            "logloss_base": _wmean(pms, "logloss_base"), "bins": bins}
+
+
+def pool_replays(replays):
+    """One summary across all replayed seasons. Event and advancement scores pool only the seasons that were scored."""
+    if not replays:
+        return None
+    ev = [r["events"] for r in replays if r.get("events")]
+    adv = [r["advancement"] for r in replays if r.get("advancement")]
+    return {"seasons": [r["year"] for r in replays],
+            "strength": pool_strength([r.get("strength") for r in replays]),
+            "matches": pool_matches([r.get("matches") for r in replays]),
+            "events": {"seasons": [r["year"] for r in replays if r.get("events")], "events": sum(e["events"] for e in ev),
+                       "win": pool_prob([e["win"] for e in ev]), "finalist": pool_prob([e["finalist"] for e in ev])} if ev else None,
+            "advancement": {"seasons": [r["year"] for r in replays if r.get("advancement")],
+                            **{k: pool_prob([a[k] for a in adv if a.get(k)]) for k in ("dcmp", "cmp_district", "cmp_regional")}} if adv else None}
+
+
+def pool_matches(ms):
+    ms = [m for m in ms if m]
+    if not ms:
+        return None
+    out = {"n": sum(m["n"] for m in ms), "seasons": len(ms), "logloss_coinflip": math.log(2)}
+    for k in ("accuracy", "logloss", "brier"):
+        out[k] = _wmean(ms, k)
+    ins = [m for m in ms if m.get("inseason_logloss") is not None]
+    if ins:
+        out["inseason_logloss"] = _wmean(ins, "inseason_logloss"); out["inseason_accuracy"] = _wmean(ins, "inseason_accuracy")
+    return out
+
+
+def pool_strength(ss):
+    ss = [s for s in ss if s]
+    if not ss:
+        return None
+    n = sum(s["n"] for s in ss)
+    out = {"n": n, "seasons": len(ss), "coverage_10_90": _wmean(ss, "coverage_10_90"), "spearman": _wmean(ss, "spearman"), "by_age": {}}
+    for k in ("rmse_forecast", "rmse_persistence", "rmse_always_average"):
+        out[k] = math.sqrt(sum(s["n"] * s[k] ** 2 for s in ss) / n)
+    for band in {b for s in ss for b in s["by_age"]}:
+        parts = [(s["by_age"][band]) for s in ss if band in s["by_age"]]
+        m = sum(p["n"] for p in parts)
+        out["by_age"][band] = {"n": m, "forecast": math.sqrt(sum(p["n"] * p["forecast"] ** 2 for p in parts) / m),
+                               "persistence": math.sqrt(sum(p["n"] * p["persistence"] ** 2 for p in parts) / m)}
+    return out

@@ -1,5 +1,7 @@
 {
   "_comment": "Advancement rules transcribed from the 2026 FRC Game Manual sections 11/12 and FIRST 2026 advancement posts. 2027 (BIOCORE) manual is not out until Jan 9 2027, so these are the best available; edit here when it changes. Each value should be re-verified against the 2027 manual.",
+  "scorecard_advancement_years": [2026],
+  "scorecard_advancement_years_note": "Seasons whose advancement rules (district slots, DCMP capacities, points) are transcribed in this file. The Scorecard only scores District Championship / Worlds odds for these seasons, because replaying a season under a different year's rules would measure the rules mismatch, not the model. Add a year only after transcribing that year's allocations.",
   "season_assumptions": {
     "championship_total_slots": 600,
     "championship_prequalified": 9,

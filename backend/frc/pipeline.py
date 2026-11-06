@@ -23,6 +23,14 @@ def cut(data, before):
 # (0.5335 -> 0.5306, 0.5200 -> 0.5176) while x0.8 raised it.
 BETA_SCALE = 1.25
 
+# What the replays can and cannot claim. Rating hyperparameters (ratings.GRID) were tuned on seasons through
+# TUNED_THROUGH, so earlier replays are partly in-sample; BETA_SCALE and simulate.PLAYOFF_SHARPEN were chosen by
+# looking at the 2025 and 2026 replays, so those two are not a clean test of those two settings.
+TUNED_THROUGH = 2023
+SCALE_FACTORS_CHOSEN_WITH = (2025, 2026)
+# The simulator models the double-elimination playoffs introduced in 2023; earlier formats were different.
+DOUBLE_ELIM_FROM = 2023
+
 
 def calibrate_beta(data, z_by_year, years):
     """P(red wins) = sigmoid(beta * (sum z_red - sum z_blue)), z = end-of-season standardised strength."""

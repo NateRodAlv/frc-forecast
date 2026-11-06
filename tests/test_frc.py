@@ -250,7 +250,7 @@ def test_scoring_helpers():
     rng = np.random.default_rng(1)
     p = rng.uniform(0.02, 0.6, 3000); o = (rng.random(3000) < p).astype(float)
     m = score.prob_metrics(p, o)
-    assert m["skill"] > 0.05 and abs(m["expected"] - m["actual"]) < 0.06 * m["expected"]
+    assert m["skill"] > 0.05 and "expected" not in m and "actual" not in m     # the sum-of-probabilities check was removed as redundant
     assert all(abs(b["pred"] - b["actual"]) < 0.12 for b in m["bins"] if b["n"] > 100)     # calibrated by construction
     assert score.prob_metrics([0.5] * 5, [1] * 5) is None                                 # too few cases
     mk = lambda lvl, n, r, b: {"lvl": lvl, "set": 1, "num": n, "red": [1, 2, 3], "blue": [4, 5, 6], "rs": r, "bs": b}
@@ -260,7 +260,7 @@ def test_scoring_helpers():
     data = {"events": [ev], "matches": {"e": [mk("f", 1, 10, 5), mk("f", 2, 9, 3)]}}
     sim = {"e": {"teams": {str(t): {"p_win": 0.5 if t <= 3 else 0.0, "p_finalist": 1.0 if t <= 6 else 0.0} for t in range(1, 25)}}}
     r = score.score_events(2026, data, sim)
-    assert r["events"] == 1 and r["win"]["actual"] == 3
+    assert r["events"] == 1 and round(r["win"]["base_rate"] * r["win"]["n"]) == 3
 
 
 def test_advancement_not_scored_without_rosters():
@@ -268,5 +268,39 @@ def test_advancement_not_scored_without_rosters():
     rules = _rules_syn()
     season = {"teams": {t: {"model": "district", "district": "syn", "p_dcmp": 0.5, "p_cmp": 0.1} for t in range(60)}}
     data = {"events": [], "event_teams": {}, "matches": {}}
-    r = score.score_advancement(2026, data, season, rules, {"syn": "syn"})
-    assert r["dcmp"] is None and r["cmp_district"] is None and r["slots"][0]["cmp_actual"] is None
+    r = score.score_advancement(2026, data, season, {"syn": "syn"})
+    assert r["dcmp"] is None and r["cmp_district"] is None and "slots" not in r
+
+
+def test_pooling_across_seasons():
+    from frc import score
+    rng = np.random.default_rng(3)
+    def season(n, lo, hi):
+        p = rng.uniform(lo, hi, n); return score.prob_metrics(p, (rng.random(n) < p).astype(float))
+    a, b = season(2000, 0.02, 0.5), season(4000, 0.05, 0.7)
+    pool = score.pool_prob([a, b, None])
+    assert pool["n"] == 6000 and pool["seasons"] == 2
+    assert sum(x["n"] for x in pool["bins"]) == 6000                                    # bins merge exactly
+    assert abs(pool["brier"] - (2000 * a["brier"] + 4000 * b["brier"]) / 6000) < 1e-12
+    assert abs(pool["skill"] - (1 - pool["brier"] / pool["brier_base"])) < 1e-12
+    assert score.pool_prob([a])["brier"] == a["brier"] and score.pool_prob([None]) is None
+    s1 = {"n": 100, "rmse_forecast": 0.6, "rmse_persistence": 0.7, "rmse_always_average": 1.0, "coverage_10_90": 0.8, "spearman": 0.7, "by_age": {}}
+    s2 = {"n": 300, "rmse_forecast": 0.8, "rmse_persistence": 0.9, "rmse_always_average": 1.0, "coverage_10_90": 0.9, "spearman": 0.6, "by_age": {}}
+    ps = score.pool_strength([s1, s2])
+    assert abs(ps["rmse_forecast"] - ((100 * 0.36 + 300 * 0.64) / 400) ** 0.5) < 1e-12      # RMSE pools through the squares
+    assert abs(ps["coverage_10_90"] - 0.875) < 1e-12
+    rep = lambda y, ev, adv: {"year": y, "strength": s1, "matches": None, "events": ev, "advancement": adv}
+    pr = score.pool_replays([rep(2022, None, None), rep(2023, {"events": 5, "win": a, "finalist": b}, None)])
+    assert pr["seasons"] == [2022, 2023] and pr["events"]["seasons"] == [2023] and pr["advancement"] is None
+
+
+def test_replayable_years():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+    import run
+    played = [2016, 2017, 2018, 2019, 2022, 2023, 2024, 2025, 2026]
+    ok, skipped = run.replayable_years(played, 2027, 4)
+    assert ok == [2022, 2023, 2024, 2025, 2026]                                         # every year with 4+ earlier seasons
+    reasons = {s["year"]: s["reason"] for s in skipped}
+    assert set(reasons) == {2016, 2017, 2018, 2019, 2020, 2021} and "COVID" in reasons[2020] and "0 earlier" in reasons[2016]
+    assert run.replayable_years(played, 2027, 4, only={2025})[0] == [2025]
+    assert run.replayable_years(played, 2026, 4)[0] == [2022, 2023, 2024, 2025]          # never replays the target or later

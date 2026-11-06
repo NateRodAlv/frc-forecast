@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import json
 import sys
+import traceback
 from collections import defaultdict
 from pathlib import Path
 
@@ -100,12 +101,44 @@ def make_scorecard(rep, data, main, rules):
     def inseason(key):
         p = ratings.selected_match_p(main["sel"], key)
         return nan if p is None else p
-    return {"year": year, "trained_through": rep["played"][-1], "rating_model": pipeline.model_label(rep["sel"]),
-            "analog_weight": rep["blend_w"], "forecast_backtest": rep["fb"],
+    # Score only what the simulator models for that season: the playoff format changed in 2023, and the advancement
+    # rules in rules.json are one season's manual. Anything else is reported as not scored, with the reason.
+    not_scored = {}
+    if year >= pipeline.DOUBLE_ELIM_FROM:
+        events = score.score_events(year, data, rep["season"]["events"])
+    else:
+        events = None
+        not_scored["events"] = f"the simulator models the double-elimination playoffs used from {pipeline.DOUBLE_ELIM_FROM}; {year} used a different format"
+    if year in rules.get("scorecard_advancement_years", []):
+        advancement = score.score_advancement(year, data, rep["season"], alias_map(rules))
+    else:
+        advancement = None
+        not_scored["advancement"] = f"config/rules.json holds the advancement rules for {rules.get('scorecard_advancement_years', [])} only"
+    tuning = ("in_sample" if year <= pipeline.TUNED_THROUGH else
+              "partly_held_out" if year in pipeline.SCALE_FACTORS_CHOSEN_WITH else "held_out")
+    return {"year": year, "trained_through": rep["played"][-1], "history_seasons": len(rep["played"]), "tuning": tuning,
+            "rating_model": pipeline.model_label(rep["sel"]), "analog_weight": rep["blend_w"], "forecast_backtest": rep["fb"],
             "strength": score.score_strength(rep["fc"], main["z"].get(year, {}), main["counts"].get(year, {}), data["rookie"], year),
             "matches": score.score_matches(year, data, rep["strengths"], rep["beta"], inseason),
-            "events": score.score_events(year, data, rep["season"]["events"]),
-            "advancement": score.score_advancement(year, data, rep["season"], rules, alias_map(rules))}
+            "events": events, "advancement": advancement, "not_scored": not_scored}
+
+
+def replayable_years(played_years, target, min_seasons, only=None):
+    """Seasons that can be replayed: played, before the target, and with at least `min_seasons` earlier played seasons
+    to learn from. Returns (years to replay, [{year, reason}] for every other season in range)."""
+    ok = [y for i, y in enumerate(played_years) if y < target and i >= min_seasons and (not only or y in only)]
+    skipped = []
+    for y in range(min(played_years + [target]), target):
+        if y in ok or (only and y not in only):
+            continue
+        if y in forecast.SKIP_YEARS:
+            reason = "no FRC season was played due to COVID"
+        elif y not in played_years:
+            reason = "no match results in the data"
+        else:
+            reason = f"only {played_years.index(y)} earlier season(s) to learn from; the replay needs {min_seasons}"
+        skipped.append({"year": y, "reason": reason})
+    return ok, skipped
 
 
 def main():
@@ -114,7 +147,10 @@ def main():
     ap.add_argument("--start-year", type=int, default=2016)
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--nsims", type=int, default=400)
-    ap.add_argument("--no-replay", action="store_true", help="skip the previous-season replay / scorecard")
+    ap.add_argument("--no-replay", action="store_true", help="skip the past-season replays / scorecard")
+    ap.add_argument("--replay-min-seasons", type=int, default=4,
+                    help="replay every past season that has at least this many earlier played seasons to learn from")
+    ap.add_argument("--replay-years", default="", help="comma-separated seasons to replay (default: all eligible)")
     a = ap.parse_args()
     log = lambda *x: print(*x, flush=True)  # noqa
     warnings = []
@@ -158,13 +194,26 @@ def main():
     if M["n_prior"]:
         warnings.append(f"{M['n_prior']} {a.target_year} teams had no rating history; using rookie/wide priors.")
 
-    # ---- scorecard: replay the previous season with a strict cutoff, plus live scoring of the target season
-    scorecard = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "replays": [], "live": None}
-    last = played_years[-1] if played_years else None
-    if not a.no_replay and last and len(played_years) >= 6:
-        log(f"=== replay: forecasting {last} using only seasons before it ===")
-        rep = pipeline.build_forecast(data, last, rules, a.nsims, log, use_schedules=False, seed=2)
-        scorecard["replays"].append(make_scorecard(rep, data, M, rules))
+    # ---- scorecard: replay EVERY past season that has enough history, each with a strict cutoff (trained only on
+    # seasons before it), pool the results, plus live scoring of the target season
+    scorecard = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "replays": [], "pooled": None, "skipped": [],
+                 "live": None, "notes": {"min_seasons": a.replay_min_seasons, "tuned_through": pipeline.TUNED_THROUGH,
+                                         "scale_factors_chosen_with": list(pipeline.SCALE_FACTORS_CHOSEN_WITH),
+                                         "double_elim_from": pipeline.DOUBLE_ELIM_FROM,
+                                         "advancement_years": rules.get("scorecard_advancement_years", [])}}
+    if not a.no_replay and played_years:
+        only = {int(x) for x in a.replay_years.split(",") if x.strip()} or None
+        todo, scorecard["skipped"] = replayable_years(played_years, a.target_year, a.replay_min_seasons, only)
+        for y in todo:
+            log(f"=== replay: forecasting {y} using only seasons before it ===")
+            try:
+                rep = pipeline.build_forecast(data, y, rules, a.nsims, log, use_schedules=False, seed=2)
+                scorecard["replays"].append(make_scorecard(rep, data, M, rules))
+            except Exception as ex:  # one bad season must not sink the whole refresh
+                log(f"replay of {y} failed:\n{traceback.format_exc()}")
+                scorecard["skipped"].append({"year": y, "reason": f"replay failed: {type(ex).__name__}: {ex}"})
+        scorecard["skipped"].sort(key=lambda s: s["year"])
+        scorecard["pooled"] = score.pool_replays(scorecard["replays"])
     live_ev = score.score_events(a.target_year, data, season["events"])
     live_m = score.score_matches(a.target_year, data, strengths, beta)
     if live_ev["events"] or live_m:

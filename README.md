@@ -28,15 +28,29 @@ Local preview without a key: `python backend/run.py --synthetic && cd site && py
 (shows a "SYNTHETIC DEMO DATA" banner). Tests: `python -m pytest -q tests`.
 
 ## Forecast accuracy: the Scorecard tab
-Every run replays the previous season as if it were still to come: the **same production code** (`pipeline.build_forecast`) is
-trained on seasons before it only, forecasts it with random qualification schedules, and the results are scored against what
-really happened — team strength error vs. "same as last year", preseason match accuracy, event-winner/finalist calibration,
-District Championship and Worlds odds, and expected-vs-actual slot counts per district. Once the target season starts, its
-completed events are scored live. A leak test (`tests/test_frc.py::test_cutoff_blocks_target_season_results`) checks that
-scrambling the target season's results cannot change its forecast.
+Every run replays **every past season that has enough history** (at least `--replay-min-seasons`, default 4, earlier played
+seasons; with the 2016-2019 and 2022+ data that is 2022 onward) as if it were still to come: the **same production code**
+(`pipeline.build_forecast`) is trained on seasons before it only, forecasts it with random qualification schedules, and the
+results are scored against what really happened: team strength error vs. "same as last year", preseason match accuracy,
+event-winner/finalist calibration, and District Championship and Worlds odds. The tab shows one pooled summary, a
+year-by-year table, and each season's full detail. Once the target season starts, its completed events are scored live.
+`--replay-years 2024,2025` restricts the replays. A leak test (`tests/test_frc.py::test_cutoff_blocks_target_season_results`)
+checks that scrambling the target season's results cannot change its forecast.
 
-Caveats: replay uses the actual event rosters (known only approximately in a real preseason); "made Worlds / DCMP" is judged by
-attendance, which ignores declines and waitlist moves; forecasts do **not** yet update as the target season is played.
+Deliberately **not** reported: expected-vs-actual counts (sum of probabilities vs. winners, or teams per district at DCMP /
+Worlds). The simulator fills each event's three winning slots and each district's allocation exactly, so those match by
+construction and say nothing about accuracy; calibration bins and Brier skill measure whether the right teams were picked.
+
+What each season is scored on is limited to what the simulator models: event winners/finalists from 2023 (double-elimination
+playoffs; earlier formats differed), District Championship / Worlds odds only for seasons listed in
+`scorecard_advancement_years` in `config/rules.json` (currently 2026, the manual transcribed there). Add a year only after
+transcribing its allocations.
+
+Caveats: rating hyperparameters (`ratings.GRID`) were tuned on seasons through 2023 and the match/playoff sharpness factors
+(`pipeline.BETA_SCALE`, `simulate.PLAYOFF_SHARPEN`) by looking at the 2025 and 2026 replays, so the year-by-year table marks
+which seasons are clean ("Tuning" column). Replay uses the actual event rosters (known only approximately in a real
+preseason); "made Worlds / DCMP" is judged by attendance, which ignores declines and waitlist moves; forecasts do **not** yet
+update as the target season is played.
 
 ## Team age
 Age = season − rookie year + 1 (rookie years from TBA). The ridge forecaster has rookie / 2nd / 3rd-year and log-age terms, and
