@@ -264,20 +264,36 @@ function viewPredict() {
 
 function viewModel() {
   const m = S.meta, fb = m.forecast_backtest;
+  const trendUsed = m.trend_model_used || "trend", sdUsed = m.sd_model_used || "analog";
+  const label = (name, isNew, used) => h("span", {}, isNew ? h("span", { class: "badge" }, "NEW") : null, used ? h("span", { class: "badge used" }, "IN USE") : null, name);
+  const T2 = fb && fb.trend2;
   app.replaceChildren(h("h1", {}, "Model & validation"),
+    h("p", { class: "muted small" }, h("span", { class: "badge" }, "NEW"), "marks an experimental model added alongside the original, which stays in every table so you can compare them. A NEW model only drives the forecasts when it beats the original in the backtest (", h("span", { class: "badge used" }, "IN USE"), " shows which one does)."),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "1. Which rating model ranks teams best?"),
       h("p", { class: "muted small" }, `Walk-forward backtest (every match predicted before the model sees its result), tuned on seasons before ${m.test_years[0]}, scored on ${m.test_years.join(", ")}. Lower log loss is better. A stacked ensemble of the best few is used only if it beats every single model. In use: `, h("b", {}, m.best_rating_model), "."),
       table([{ label: "Model", left: true, render: (r) => r.model }, { label: "Log loss", render: (r) => r.test_logloss.toFixed(4) }, { label: "Brier", render: (r) => r.test_brier.toFixed(4) },
         { label: "Accuracy", render: (r) => pct(r.test_acc) }, { label: "Matches", render: (r) => r.test_matches }, { label: "Used", render: (r) => (r.selected ? "✓" : "") }], m.rating_leaderboard)),
     fb ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "2. Trajectory forecaster vs. baselines"),
       h("p", { class: "muted small" }, `Predicting each team's next-season strength, tested on ${fb.years.join(", ")} using only earlier seasons. RMSE in standard deviations; lower is better.`),
-      table([{ label: "Method", left: true, render: (r) => r[0] }, { label: "RMSE", render: (r) => r[1].toFixed(3) }, { label: "MAE", render: (r) => r[2] }],
-        [["Persistence (same as last year)", fb.persist.rmse, fb.persist.mae.toFixed(3)], ["Trend model (ridge + boosted trees)", fb.ridge.rmse, fb.ridge.mae.toFixed(3)],
-         ["Analog teams (same age band + history length)", fb.analog.rmse, fb.analog.mae.toFixed(3)], ...(fb.analog_nomatch ? [["Analog teams, no age matching", fb.analog_nomatch.rmse, fb.analog_nomatch.mae.toFixed(3)]] : []), [`Blend (analog weight ${m.blend_analog_weight})`, fb.blend.rmse, "–"]]),
+      table([{ label: "Method", left: true, render: (r) => label(r[0], r[1], r[2]) }, { label: "RMSE", render: (r) => r[3].toFixed(3) }, { label: "MAE", render: (r) => (r[4] == null ? "–" : r[4].toFixed(3)) }],
+        [["Persistence (same as last year)", false, false, fb.persist.rmse, fb.persist.mae],
+         ["Trend model (ridge + boosted trees)", false, trendUsed === "trend", fb.ridge.rmse, fb.ridge.mae],
+         ...(T2 ? [["Trend v2: also sees how many matches last season's rating rests on, and the team's long-run level", true, trendUsed === "trend2", T2.rmse, T2.mae]] : []),
+         ["Analog teams (same age band + history length)", false, false, fb.analog.rmse, fb.analog.mae],
+         ...(fb.analog_nomatch ? [["Analog teams, no age matching", false, false, fb.analog_nomatch.rmse, fb.analog_nomatch.mae]] : []),
+         [`Blend: Trend + analogs (analog weight ${fb.blend.analog_weight})`, false, trendUsed === "trend", fb.blend.rmse, null],
+         ...(T2 && fb.blend2 ? [[`Blend: Trend v2 + analogs (analog weight ${fb.blend2.analog_weight})`, true, trendUsed === "trend2", fb.blend2.rmse, null]] : [])]),
       h("p", { class: "muted small" }, `10–90% analog interval coverage: ${pct(fb.analog_interval_coverage_10_90, 0)} (ideal 80%). The forecaster only leans on analogs as much as the backtest justifies.`),
       fb.by_age ? h("div", {}, h("p", { class: "muted small" }, "Error by team age (RMSE, lower is better):"),
         table([{ label: "Age", left: true, render: (r) => r[0] }, { label: "Team-seasons", render: (r) => r[1].n }, { label: "Persistence", render: (r) => r[1].persist.toFixed(3) },
-          { label: "Trend model (ridge + boosted trees)", render: (r) => r[1].ridge.toFixed(3) }, { label: "Analog", render: (r) => r[1].analog.toFixed(3) }, { label: "Blend", render: (r) => r[1].blend.toFixed(3) }], byAge(fb.by_age))) : null) : null,
+          { label: "Trend model (ridge + boosted trees)", render: (r) => r[1].ridge.toFixed(3) },
+          ...(T2 ? [{ label: "Trend v2 (NEW)", render: (r) => (r[1].trend2 == null ? "–" : r[1].trend2.toFixed(3)) }] : []),
+          { label: "Analog", render: (r) => r[1].analog.toFixed(3) }, { label: "Blend", render: (r) => r[1].blend.toFixed(3) }], byAge(fb.by_age))) : null) : null,
+    fb && fb.sd ? h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "2b. How wide is each team's forecast range?"),
+      h("p", { class: "muted small" }, "The simulator draws every team's strength from its forecast and this spread, so a spread that is too wide flattens the odds (favourites look less likely to win than they are). A well-calibrated 80% range contains the real outcome 80% of the time. Same test seasons and same forecast mean for both rows, so only the spread differs."),
+      table([{ label: "Method", left: true, render: (r) => label(r[0], r[1], r[2]) }, { label: "Log score", tip: "negative log likelihood per team-season; lower is better", render: (r) => r[3].nll.toFixed(3) },
+        { label: "80% range hit rate", tip: "ideal 80%", render: (r) => pct(r[3].cov80, 0) }, { label: "50% range hit rate", tip: "ideal 50%", render: (r) => pct(r[3].cov50, 0) }, { label: "Average spread", render: (r) => r[3].mean_sd.toFixed(2) }],
+        [["Spread of similar teams' outcomes (original)", false, sdUsed === "analog", fb.sd.analog], ["Variance model v2: predicts the error size from the team's features and the season", true, sdUsed === "sd2", fb.sd.sd2]])) : null,
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "3. Candidate models not included"),
       h("ul", {}, (m.not_included || []).map((x) => h("li", {}, h("b", {}, x.model + ": "), x.why)))),
     h("div", { class: "card" }, h("h2", { style: "margin-top:0" }, "4. Assumptions"),
@@ -303,7 +319,9 @@ function probCard(title, pm, blurb, why) {
 function strengthCard(s, blurb) {
   return h("div", { class: "card" }, h2("Team strength forecasts"), h("p", { class: "muted small" }, blurb),
     h("div", { class: "grid" }, stat("Our forecast", s.rmse_forecast.toFixed(3), "RMSE"), stat("Same as last year", s.rmse_persistence.toFixed(3), "RMSE"), stat("Always average", s.rmse_always_average.toFixed(3), "RMSE"),
-      stat("80% range hit rate", pct(s.coverage_10_90, 0), "ideal: 80%"), stat("Rank correlation", s.spearman.toFixed(2), `${s.n.toLocaleString()} team-seasons`)),
+      stat("80% range hit rate", pct(s.coverage_10_90, 0), "similar-teams range; ideal: 80%"),
+      s.coverage_sd_80 != null ? stat("80% range hit rate (simulator's spread)", pct(s.coverage_sd_80, 0), "forecast ± 1.28 × spread; ideal: 80%") : null,
+      stat("Rank correlation", s.spearman.toFixed(2), `${s.n.toLocaleString()} team-seasons`)),
     Object.keys(s.by_age).length ? table([{ label: "Team age", left: true, render: (x) => x[0] }, { label: "Teams", render: (x) => x[1].n }, { label: "Our forecast", render: (x) => x[1].forecast.toFixed(3) },
       { label: "Same as last year", render: (x) => x[1].persistence.toFixed(3) }], byAge(s.by_age)) : null);
 }

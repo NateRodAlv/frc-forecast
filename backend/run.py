@@ -305,7 +305,8 @@ def main():
     meta = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "target_year": a.target_year, "double_elim_from": pipeline.DOUBLE_ELIM_FROM,
             "synthetic": a.synthetic, "best_rating_model": model_label, "selected_model": selected,
             "rating_leaderboard": sel["board"], "test_years": test_years, "forecast_backtest": fb,
-            "blend_analog_weight": w, "beta": beta, "nsims": a.nsims, "warnings": warnings,
+            "blend_analog_weight": w, "trend_model_used": M["trend_used"], "sd_model_used": M["sd_used"],
+            "beta": beta, "nsims": a.nsims, "warnings": warnings,
             "districts": season["districts"], "rules_note": rules["_comment"],
             "normalization": "Match scores are divided by the season's mean alliance score before any model sees them, and every season's team ratings are standardised (mean 0, sd 1) over teams with at least 8 matches that season, so years with different games are comparable.",
             "not_included": [

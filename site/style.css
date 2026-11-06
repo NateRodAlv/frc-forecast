@@ -30,6 +30,8 @@ tr:last-child td{border-bottom:0}tbody tr:hover{background:var(--bg)}
 .tablewrap{overflow-x:auto}
 .pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;background:var(--bg);border:1px solid var(--line);margin:0 4px 2px 0;color:var(--muted)}
 .pill.up{color:var(--up);border-color:var(--up)}.pill.down{color:var(--down);border-color:var(--down)}
+.badge{display:inline-block;padding:0 6px;margin-right:6px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.05em;line-height:16px;vertical-align:1px;color:#fff;background:var(--accent)}
+.badge.used{background:var(--up)}
 .bar{display:inline-block;height:8px;border-radius:4px;background:var(--accent);vertical-align:middle;min-width:1px}
 .barbg{display:inline-block;width:70px;height:8px;background:var(--line);border-radius:4px;margin-left:6px;vertical-align:middle}
 .pos{color:var(--up)}.neg{color:var(--down)}

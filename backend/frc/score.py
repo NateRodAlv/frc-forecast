@@ -115,17 +115,20 @@ def score_strength(fc, z_actual, counts_actual, rookie, year, min_matches=8):
         if t in z_actual and counts_actual.get(t, 0) >= min_matches:
             rk = rookie.get(t)
             band = age_band(age_at(year - 1, rk)) if rk else "?"
-            rows.append((f["mean"], f["z_last"], f["q10"], f["q90"], z_actual[t], band))
+            rows.append((f["mean"], f["z_last"], f["q10"], f["q90"], z_actual[t], band, f.get("sd")))
     if len(rows) < 50:
         return None
     a = np.array([r[:5] for r in rows], float)
     y = a[:, 4]
+    sd = np.array([r[6] if r[6] is not None else np.nan for r in rows], float)
 
     def rm(p, m=None):
         m = np.ones(len(y), bool) if m is None else m
         return float(np.sqrt(np.mean((y[m] - p[m]) ** 2)))
     out = {"n": len(rows), "rmse_forecast": rm(a[:, 0]), "rmse_persistence": rm(a[:, 1]), "rmse_always_average": rm(np.zeros(len(y))),
            "coverage_10_90": float(np.mean((y >= a[:, 2]) & (y <= a[:, 3]))),
+           # the interval the simulator actually uses: forecast mean +/- 1.2816 sd (ideal 80%)
+           "coverage_sd_80": float(np.mean(np.abs(y - a[:, 0]) < 1.2816 * sd)) if not np.isnan(sd).any() else None,
            "spearman": float(spearmanr(a[:, 0], y)[0]), "by_age": {}}
     bands = np.array([r[5] for r in rows])
     for b in sorted(set(bands)):
@@ -221,6 +224,9 @@ def pool_strength(ss):
         return None
     n = sum(s["n"] for s in ss)
     out = {"n": n, "seasons": len(ss), "coverage_10_90": _wmean(ss, "coverage_10_90"), "spearman": _wmean(ss, "spearman"), "by_age": {}}
+    sdc = [s for s in ss if s.get("coverage_sd_80") is not None]
+    if sdc:
+        out["coverage_sd_80"] = _wmean(sdc, "coverage_sd_80")
     for k in ("rmse_forecast", "rmse_persistence", "rmse_always_average"):
         out[k] = math.sqrt(sum(s["n"] * s[k] ** 2 for s in ss) / n)
     for band in {b for s in ss for b in s["by_age"]}:

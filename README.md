@@ -56,6 +56,22 @@ which seasons are clean ("Tuning" column). Replay uses the actual event rosters 
 preseason); "made Worlds / DCMP" is judged by attendance, which ignores declines and waitlist moves; forecasts do **not** yet
 update as the target season is played.
 
+## Experimental models (marked NEW on the Model page)
+New variants are added **beside** the originals, never in place of them: both appear in the Model tab's tables and the
+original stays selectable. A NEW model only drives the forecasts when it beats the original on the same walk-forward seasons by a margin
+(`pipeline.TREND2_MARGIN`, `pipeline.SD2_MARGIN`); the **IN USE** badge shows which one does.
+
+| Model | Replaces | What is different | Backtest (rebuilt history, see caveat) |
+|---|---|---|---|
+| **Trend v2** (`forecast.Trend2`) | Trend model | The boosted-tree half also sees how many matches last season's rating rests on, the team's long-run mean, its best/worst recent seasons, a 3-season change and the number of seasons seen. | RMSE 0.6393 vs 0.6420 (2023-26), 0.7471 vs 0.7511 (2013-19) |
+| **Variance model v2** (`forecast.SdModel`) | Spread of analog teams | Predicts each team's squared forecast error (out-of-fold) from its features and the season, so it follows the era. The analog spread was ~15% too wide in 2023-26 (a nominal 80% range covered 87%), which flattens simulated win odds. | log score 0.923 vs 0.954 (2023-26), 1.108 vs 1.131 (2013-19); 80% range covers 85% vs 87% |
+
+Caveats: these numbers were measured offline on a history rebuilt from the site's `teams.json` export, which only contains teams
+active since 2024 (so defunct teams are missing and absolute RMSEs run ~0.006 above the live backtest). Only the *relative* comparison is
+meaningful, and it was consistent across both windows, but the gain is small (~0.4% RMSE). The next real build re-measures both on the full data and
+the gate decides. The Scorecard also now reports `coverage_sd_80`: how often the simulator's own forecast ± 1.28 × spread contains the real rating.
+Changing the spread changes the simulated win odds, so re-check `PLAYOFF_SHARPEN` against the next scorecard rather than stacking both fixes.
+
 ## Team age
 Age = season − rookie year + 1 (rookie years from TBA). The ridge forecaster has rookie / 2nd / 3rd-year and log-age terms, and
 analog matching only compares a team with past team-seasons of the same age band (1, 2, 3, 4, 5-7, 8-12, 13+) AND the same amount of

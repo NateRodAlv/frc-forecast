@@ -31,6 +31,11 @@ SCALE_FACTORS_CHOSEN_WITH = (2025, 2026)
 DOUBLE_ELIM_FROM = simulate.DOUBLE_ELIM_FROM   # playoff format the simulator uses per season (single elimination before)
 
 
+# A new forecaster replaces the original only if it is better by at least this much on the walk-forward seasons.
+TREND2_MARGIN = 5e-4     # RMSE, in standard deviations of team strength
+SD2_MARGIN = 5e-3        # log score of the forecast spread (nats per team-season)
+
+
 def calibrate_beta(data, z_by_year, years):
     """P(red wins) = sigmoid(beta * (sum z_red - sum z_blue)), z = end-of-season standardised strength."""
     X, y = [], []
@@ -64,9 +69,14 @@ def build_forecast(data, target, rules, nsims=400, log=print, use_schedules=True
     z = forecast.zscores(end_strength, counts)
     pct = forecast.percentiles(z, counts)
     rookie = data.get("rookie", {})
-    fb = forecast.walk_forward(z, [y for y in played if y >= played[0] + 4][-4:], rookie) if len(played) > 6 else None
-    w = fb["blend"]["analog_weight"] if fb else 0.4
-    fc = forecast.predict_next(z, target, blend_w=w, rookie=rookie)
+    fb = forecast.walk_forward(z, [y for y in played if y >= played[0] + 4][-4:], rookie, counts=counts) if len(played) > 6 else None
+    # NEW forecasters (Trend v2, variance model v2) sit beside the originals and are used only when they beat them
+    # on the same walk-forward seasons by a margin; the Model page lists both either way.
+    use_t2 = bool(fb and fb["trend2"]["rmse"] < fb["ridge"]["rmse"] - TREND2_MARGIN)
+    use_sd2 = bool(fb and fb["sd"]["sd2"]["nll"] < fb["sd"]["analog"]["nll"] - SD2_MARGIN)
+    w = (fb["blend2"] if use_t2 else fb["blend"])["analog_weight"] if fb else 0.4
+    fc = forecast.predict_next(z, target, blend_w=w, rookie=rookie, counts=counts,
+                               trend="trend2" if use_t2 else "trend", sd_model="sd2" if use_sd2 else "analog")
     rk_prior = forecast.rookie_prior(z, rookie)
     beta = calibrate_beta(train, z, test_years) * BETA_SCALE
 
@@ -91,6 +101,7 @@ def build_forecast(data, target, rules, nsims=400, log=print, use_schedules=True
     season = simulate.run_season(sim, target, tevents, data["event_teams"], strengths, rookie, sched, log)
     return {"target": target, "train": train, "played": played, "test_years": test_years, "sel": sel,
             "end_strength": end_strength, "counts": counts, "z": z, "pct": pct, "fb": fb, "blend_w": w, "fc": fc,
+            "trend_used": "trend2" if use_t2 else "trend", "sd_used": "sd2" if use_sd2 else "analog",
             "rookie_prior": rk_prior, "beta": beta, "tevents": tevents, "strengths": strengths, "n_prior": n_prior,
             "sched": sched, "season": season}
 

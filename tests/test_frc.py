@@ -76,6 +76,55 @@ def test_forecaster_beats_persistence_and_finds_planted_rebound():
     assert 0.6 < fb["analog_interval_coverage_10_90"] < 0.95
 
 
+def _synthetic_history():
+    d = synth.make_dataset(n_teams=900, years=range(2012, 2027), seed=3)
+    m = ratings.EPA(carry=0.7, lr0=0.6)
+    _, es = ratings.run(m, d)
+    return d, forecast.zscores(es, m.season_counts), m.season_counts
+
+
+def test_new_forecasters_are_reported_beside_the_originals_and_leave_them_unchanged():
+    d, z, counts = _synthetic_history()
+    yrs = [2023, 2024, 2025, 2026]
+    old = forecast.walk_forward(z, yrs)
+    new = forecast.walk_forward(z, yrs, counts=counts)
+    for k in ("persist", "ridge", "analog", "analog_nomatch"):          # originals identical with or without the new models
+        assert new[k] == old[k]
+    assert new["blend"] == old["blend"] and "trend2" not in old and "sd" not in old
+    assert new["trend2"]["rmse"] < new["persist"]["rmse"]
+    assert 0.0 <= new["blend2"]["analog_weight"] <= 1.0 and new["blend2"]["rmse"] <= new["trend2"]["rmse"] + 1e-12
+    for key in ("analog", "sd2"):
+        s = new["sd"][key]
+        assert 0.6 < s["cov80"] < 0.97 and 0.3 < s["cov50"] < 0.8 and s["nll"] > 0 and s["mean_sd"] >= 0.25
+    assert all("trend2" in v for v in new["by_age"].values())
+
+
+def test_new_forecasters_in_predict_next_and_no_lookahead():
+    d, z, counts = _synthetic_history()
+    rk = d["rookie"]
+    base = forecast.predict_next(z, 2027, blend_w=0.0, rookie=rk)
+    both = forecast.predict_next(z, 2027, blend_w=0.0, rookie=rk, counts=counts)      # defaults = original models
+    t2 = forecast.predict_next(z, 2027, blend_w=0.0, rookie=rk, counts=counts, trend="trend2", sd_model="sd2")
+    assert set(base) == set(both) == set(t2)
+    assert all(abs(base[t]["mean"] - both[t]["mean"]) < 1e-12 and abs(base[t]["sd"] - both[t]["sd"]) < 1e-12 for t in base)
+    assert all(v["sd"] >= 0.3 - 1e-9 and v["sd"] == v["sd2"] and v["mean"] == v["trend2"] for v in t2.values())
+    assert all("trend2" in v and "sd_analog" in v and "sd2" in v for v in both.values()) and not any("trend2" in v for v in base.values())
+    assert any(abs(t2[t]["mean"] - base[t]["mean"]) > 1e-6 for t in base)          # genuinely a different model
+    try:
+        forecast.predict_next(z, 2027, rookie=rk, trend="trend2")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("trend2 without counts must be refused")
+    # the v2 features read only the last observed season's match count: other seasons' counts cannot change them
+    h = forecast.histories(z)
+    t = next(t for t, s in h.items() if len(s) >= 5)
+    ser = h[t][:-1]
+    c2 = {y: {tt: 1 for tt in v} for y, v in counts.items() if y != ser[-1][0]}
+    c2[ser[-1][0]] = counts[ser[-1][0]]
+    assert np.allclose(forecast.features_v2(t, ser, 4, counts), forecast.features_v2(t, ser, 4, c2))
+
+
 def test_tba_parsing_with_schema_shaped_fixtures(monkeypatch, tmp_path):
     from frc import tba as tbamod
     monkeypatch.setattr(tbamod, "CACHE", tmp_path)

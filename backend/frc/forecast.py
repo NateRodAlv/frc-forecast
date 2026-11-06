@@ -119,6 +119,39 @@ def build_pairs(h, rookie=None, first_year=None, max_target=None):
     return np.array(X), np.array(y), meta
 
 
+# ---------------------------------------------------------------- v2 features (NEW; the originals above are unchanged)
+NB = len(FEATS)
+EXT_FEATS = ["log_matches", "mean_last3", "mean_all", "max_all", "min_last4", "d3", "log_seasons"]
+
+
+def features_v2(team, ser, age, counts):
+    """FEATS plus 7 columns that tell the model how far to trust last season and where the team sits long-run.
+    ser: [(year, z)] up to the last observed season. counts: {year: {team: matches played}} (unknown -> 8, the
+    minimum used when standardising). Everything here is known before the target season starts."""
+    v = [a for _, a in ser]
+    base = features(v, age)
+    n0 = (counts or {}).get(ser[-1][0], {}).get(team, 8)
+    z3 = v[-4] if len(v) > 3 else v[-3] if len(v) > 2 else v[-2] if len(v) > 1 else v[-1]
+    ext = [math.log(max(n0, 1)), float(np.mean(v[-3:])), float(np.mean(v)), float(max(v)), float(min(v[-4:])),
+           (v[-3] - z3) if len(v) > 2 else 0.0, math.log(len(v))]
+    return np.r_[base, ext]
+
+
+def build_pairs_v2(h, counts, rookie=None, first_year=None, max_target=None):
+    """Same pairs, in the same order, as build_pairs, but with the v2 feature columns.
+    Returns (X, y, target_year per row)."""
+    X, y, ty = [], [], []
+    for t, ser in h.items():
+        rk = rookie_of(t, ser, rookie, first_year if first_year is not None else ser[0][0] - 1)
+        for i in range(len(ser) - 1):
+            if max_target is not None and ser[i + 1][0] > max_target:
+                continue
+            X.append(features_v2(t, ser[: i + 1], age_at(ser[i][0], rk), counts))
+            y.append(ser[i + 1][1])
+            ty.append(ser[i + 1][0])
+    return np.array(X), np.array(y), np.array(ty)
+
+
 # ---------------------------------------------------------------- models
 class Ridge:
     def __init__(self, lam=3.0):
@@ -165,6 +198,78 @@ class Trend:
 
     def predict(self, X):
         return 0.5 * self.ridge.predict(_top_terms(X)) + 0.5 * self.gbm.predict(X)
+
+
+def _gbm(**kw):
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    return HistGradientBoostingRegressor(**kw)
+
+
+class Trend2:
+    """NEW. Trend v2: the same ridge (base features + top-end terms) averaged with a boosted-tree model that also sees
+    EXT_FEATS (how many matches the last rating rests on, the team's long-run level, best/worst recent seasons).
+    Takes the 18-column matrix from features_v2 / build_pairs_v2. Walk-forward on real 2013-2026 history: RMSE
+    0.6393 vs 0.6420 (2023-26) and 0.7471 vs 0.7511 (2013-19) for Trend, i.e. small but it held in both windows."""
+
+    def __init__(self, lam=3.0):
+        self.lam = lam
+
+    def fit(self, X, y):
+        self.ridge = Ridge(self.lam).fit(_top_terms(X[:, :NB]), y)
+        self.gbm = _gbm(max_depth=3, learning_rate=0.05, max_iter=200, min_samples_leaf=60,
+                        l2_regularization=2.0, random_state=0).fit(X, y)
+        self.resid_sd = self.ridge.resid_sd
+        return self
+
+    def predict(self, X):
+        return 0.5 * self.ridge.predict(_top_terms(X[:, :NB])) + 0.5 * self.gbm.predict(X)
+
+
+def oof_residuals(X, y, ty, folds=5):
+    """Out-of-fold Trend2 residuals (folds split by target season), so the variance model sees honest errors."""
+    r = np.zeros(len(y))
+    fid = {v: i % folds for i, v in enumerate(sorted(set(ty.tolist())))}
+    f = np.array([fid[v] for v in ty.tolist()])
+    for k in range(folds):
+        tr = f != k
+        if tr.sum() < 100 or (~tr).sum() == 0:
+            continue
+        r[~tr] = y[~tr] - Trend2().fit(X[tr], y[tr]).predict(X[~tr])
+    return r
+
+
+class SdModel:
+    """NEW. Forecast-uncertainty model: predicts each team's squared forecast error from its features AND the season
+    (so it follows the era: ratings have got steadier as events got longer and rosters better known). Season is the
+    target season; for a forecast beyond the data it falls into the most recent bin. Replaces the spread of analog
+    teams (which is ~15% too wide in 2023-26: a nominal 80% interval covered 87%)."""
+    FLOOR = 0.09      # variance floor -> sd >= 0.3
+
+    def fit(self, X, y, ty):
+        o = oof_residuals(X, y, ty)
+        self.m = _gbm(max_depth=3, learning_rate=0.05, max_iter=150, min_samples_leaf=150,
+                      l2_regularization=5.0, random_state=0).fit(np.c_[X, ty], o ** 2)
+        return self
+
+    def predict(self, X, target_year):
+        return np.sqrt(np.clip(self.m.predict(np.c_[X, np.full(len(X), target_year)]), self.FLOOR, None))
+
+
+def analog_sd(an, X, bands, lcs, pa):
+    """The original uncertainty: weighted spread of the analog neighbours' outcomes (floor 0.25)."""
+    out = []
+    for i in range(len(X)):
+        idx, w, _, _, _ = an.neighbours(X[i], bands[i], lcs[i])
+        out.append(max(float(np.sqrt(np.sum(w * (an.y[idx] - pa[i]) ** 2))), 0.25))
+    return np.array(out)
+
+
+def sd_report(res, sd):
+    """Quality of a Normal(mean, sd) forecast: log score (lower is better) and how often the 80% / 50% interval hit."""
+    r = res / sd
+    return {"nll": float(np.mean(0.5 * np.log(2 * np.pi * sd ** 2) + 0.5 * r ** 2)),
+            "cov80": float(np.mean(np.abs(r) < 1.2816)), "cov50": float(np.mean(np.abs(r) < 0.6745)),
+            "mean_sd": float(np.mean(sd)), "resid_over_sd": float(np.std(r))}
 
 
 class Analog:
@@ -214,8 +319,10 @@ class Analog:
 
 
 # ---------------------------------------------------------------- backtest
-def walk_forward(z, test_years, rookie=None, k=60):
-    """Return metrics per method and the best blend weight (analog share). Trains only on targets < test year."""
+def walk_forward(z, test_years, rookie=None, k=60, counts=None):
+    """Return metrics per method and the best blend weight (analog share). Trains only on targets < test year.
+    With `counts` ({year: {team: matches}}) the NEW models (Trend v2, variance model v2) are scored on the same
+    seasons next to the originals; the original keys are computed exactly as before."""
     h = histories(z)
     first_year = min(z)
     rows = []
@@ -223,7 +330,7 @@ def walk_forward(z, test_years, rookie=None, k=60):
         Xtr, ytr, mtr = build_pairs(h, rookie, first_year, max_target=ty - 1)
         if len(Xtr) < 200:
             continue
-        Xte, yte, bands, lcs = [], [], [], []
+        Xte, yte, bands, lcs, Xte2 = [], [], [], [], []
         for t, ser in h.items():
             yrs = [a for a, _ in ser]
             if ty in yrs:
@@ -233,6 +340,8 @@ def walk_forward(z, test_years, rookie=None, k=60):
                     age = age_at(sub[-1][0], rookie_of(t, ser, rookie, first_year))
                     Xte.append(features([v for _, v in sub], age)); yte.append(ser[i][1])
                     bands.append(age_band(age)); lcs.append(min(len(sub), 3))
+                    if counts is not None:
+                        Xte2.append(features_v2(t, sub, age, counts))
         if len(Xte) < 50:
             continue
         Xte, yte = np.array(Xte), np.array(yte)
@@ -241,8 +350,15 @@ def walk_forward(z, test_years, rookie=None, k=60):
         an0 = Analog(k=k, age_match=False).fit(Xtr, ytr, mtr)
         pa, qa = an.predict(Xte, bands, lcs)
         pn, _ = an0.predict(Xte, bands, lcs)
-        rows.append({"year": ty, "yte": yte, "persist": Xte[:, 0], "ridge": rg.predict(Xte), "analog": pa,
-                     "analog_nomatch": pn, "qa": qa, "bands": np.array(bands)})
+        row = {"year": ty, "yte": yte, "persist": Xte[:, 0], "ridge": rg.predict(Xte), "analog": pa,
+               "analog_nomatch": pn, "qa": qa, "bands": np.array(bands)}
+        if counts is not None:
+            X2tr, y2tr, ty2tr = build_pairs_v2(h, counts, rookie, first_year, max_target=ty - 1)
+            Xte2 = np.array(Xte2)
+            row["trend2"] = Trend2().fit(X2tr, y2tr).predict(Xte2)
+            row["sd2"] = SdModel().fit(X2tr, y2tr, ty2tr).predict(Xte2, ty)
+            row["sd_an"] = analog_sd(an, Xte, bands, lcs, pa)
+        rows.append(row)
     if not rows:
         return None
     cat = lambda key: np.concatenate([r[key] for r in rows])  # noqa
@@ -270,34 +386,64 @@ def walk_forward(z, test_years, rookie=None, k=60):
                                                           (("persist", cat("persist")), ("ridge", pr), ("analog", pa), ("blend", bl))}}
     out["n_test"] = int(len(y))
     out["years"] = [r["year"] for r in rows]
+    if counts is not None:
+        # ---- NEW models, scored on the same team-seasons
+        p2 = cat("trend2")
+        out["trend2"] = {"mae": float(np.mean(np.abs(y - p2))), "rmse": float(np.sqrt(np.mean((y - p2) ** 2)))}
+        b2_w, b2 = 0.5, 9
+        for w in np.linspace(0, 1, 11):
+            e = float(np.sqrt(np.mean((y - ((1 - w) * p2 + w * pa)) ** 2)))
+            if e < b2:
+                b2, b2_w = e, float(w)
+        out["blend2"] = {"analog_weight": b2_w, "rmse": b2}
+        mean2 = (1 - b2_w) * p2 + b2_w * pa               # same mean for both spreads, so only the sd differs
+        out["sd"] = {"analog": sd_report(y - mean2, cat("sd_an")), "sd2": sd_report(y - mean2, cat("sd2"))}
+        for name, d in out["by_age"].items():
+            m = bands == name
+            d["trend2"] = float(np.sqrt(np.mean((y[m] - p2[m]) ** 2)))
     return out
 
 
 # ---------------------------------------------------------------- forecast
-def predict_next(z, next_year, blend_w=0.5, k=60, rookie=None):
+def predict_next(z, next_year, blend_w=0.5, k=60, rookie=None, counts=None, trend="trend", sd_model="analog"):
     """Forecast next season z for every recently active team. Returns dict team -> forecast.
-    Tags are split in two groups: `shape` (what last season looked like) and `outlook` (what the forecast expects)."""
+    Tags are split in two groups: `shape` (what last season looked like) and `outlook` (what the forecast expects).
+    trend: "trend" (original) or "trend2" (NEW); sd_model: "analog" (original) or "sd2" (NEW). The NEW ones need
+    `counts`. Both generations are always computed when counts are given and stored side by side on each team
+    (`ridge`/`trend2`, `sd_analog`/`sd2`); `ridge` keeps meaning the original trend model, `mean` and `sd` follow the choice."""
     h = histories(z)
     first_year = min(z)
     Xtr, ytr, mtr = build_pairs(h, rookie, first_year)
     rg = Trend().fit(Xtr, ytr)
     an = Analog(k=k).fit(Xtr, ytr, mtr)
     teams = [t for t, s in h.items() if s[-1][0] >= next_year - 3]
-    X, bands, lcs, ages = [], [], [], []
+    X, X2, bands, lcs, ages = [], [], [], [], []
     for t in teams:
         ser = h[t]
         age = age_at(ser[-1][0], rookie_of(t, ser, rookie, first_year))
         X.append(features([v for _, v in ser], age)); ages.append(age)
+        if counts is not None:
+            X2.append(features_v2(t, ser, age, counts))
         bands.append(age_band(age)); lcs.append(min(len(ser), 3))
     X = np.array(X)
     pr = rg.predict(X)
     pa, qa = an.predict(X, bands, lcs)
-    mean = (1 - blend_w) * pr + blend_w * pa
+    p2 = sd2 = None
+    if counts is not None:
+        X2 = np.array(X2)
+        X2tr, y2tr, ty2tr = build_pairs_v2(h, counts, rookie, first_year)
+        p2 = Trend2().fit(X2tr, y2tr).predict(X2)
+        sd2 = SdModel().fit(X2tr, y2tr, ty2tr).predict(X2, next_year)
+    elif trend == "trend2" or sd_model == "sd2":
+        raise ValueError("trend2 / sd2 need per-season match counts (counts=...)")
+    base = p2 if trend == "trend2" else pr
+    mean = (1 - blend_w) * base + blend_w * pa
     out = {}
     for i, t in enumerate(teams):
         idx, w, d, level, pool_n = an.neighbours(X[i], bands[i], lcs[i])
         yy = an.y[idx]
-        sd = max(float(np.sqrt(np.sum(w * (yy - pa[i]) ** 2))), 0.25)
+        sd_an = max(float(np.sqrt(np.sum(w * (yy - pa[i]) ** 2))), 0.25)
+        sd = float(sd2[i]) if sd_model == "sd2" else sd_an
         analogs, seen = [], set()
         for j in np.argsort(d):                         # nearest first, one entry per team
             m = an.meta[idx[j]]
@@ -308,7 +454,7 @@ def predict_next(z, next_year, blend_w=0.5, k=60, rookie=None):
             if len(analogs) == 5:
                 break
         d1, dd, z0 = X[i, 1], X[i, 3], X[i, 0]
-        edge = float(pa[i] - pr[i])
+        edge = float(pa[i] - base[i])
         shape, outlook = [], []
         if ages[i] is not None and ages[i] <= 3:
             shape.append(f"young team (season {ages[i]} last year)")
@@ -331,6 +477,7 @@ def predict_next(z, next_year, blend_w=0.5, k=60, rookie=None):
         out[t] = {"z_last": float(z0), "mean": float(mean[i]), "sd": sd,
                   "q10": float(qa[i, 0]), "q50": float(qa[i, 1]), "q90": float(qa[i, 2]),
                   "ridge": float(pr[i]), "analog": float(pa[i]), "analog_edge": edge,
+                  **({"trend2": float(p2[i]), "sd_analog": sd_an, "sd2": float(sd2[i])} if p2 is not None else {}),
                   "age": ages[i], "analog_pool": {"age_band": bands[i], "history": ("3+" if lcs[i] == 3 else str(lcs[i])),
                                                   "n": int(pool_n), "level": int(level)},
                   "history": [[a, round(v, 2)] for a, v in h[t][-6:]], "analogs": analogs,
