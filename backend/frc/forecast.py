@@ -272,6 +272,37 @@ def sd_report(res, sd):
             "mean_sd": float(np.mean(sd)), "resid_over_sd": float(np.std(r))}
 
 
+def preseason_seeds(z, counts, rookie=None, min_year_offset=5):
+    """NEW. A preseason strength forecast (in z units) for every team and every season, each made ONLY from seasons
+    before it: for season y, Trend2 is fitted on target seasons < y and applied to the team histories up to y-1.
+    The seeded rating models (ratings.SEEDED) start each season from these instead of from `carry x last rating`.
+    Returns {"seeds": {year: {team: z_hat}}, "rookie_z": {year: mean first-season z of earlier rookies}}."""
+    h = histories(z)
+    first = min(z)
+    seeds, rookie_z = {}, {}
+    for y in sorted(z):
+        if y < first + min_year_offset:
+            continue
+        Xtr, ytr, _ = build_pairs_v2(h, counts, rookie, first, max_target=y - 1)
+        if len(Xtr) < 500:
+            continue
+        m = Trend2().fit(Xtr, ytr)
+        teams, X = [], []
+        for t, ser in h.items():
+            sub = [(yy, v) for yy, v in ser if yy < y]
+            if not sub or sub[-1][0] < y - 3:
+                continue
+            age = age_at(sub[-1][0], rookie_of(t, ser, rookie, first))
+            teams.append(t)
+            X.append(features_v2(t, sub, age, counts))
+        if not teams:
+            continue
+        seeds[y] = {t: float(v) for t, v in zip(teams, m.predict(np.array(X)))}
+        firsts = [ser[0][1] for ser in h.values() if first < ser[0][0] < y]
+        rookie_z[y] = float(np.mean(firsts)) if firsts else -0.3
+    return {"seeds": seeds, "rookie_z": rookie_z}
+
+
 class Analog:
     """kNN over past team-seasons. With age_match=True the candidate pool is restricted to the same age band and
     the same history length, and only the features that exist for that history length are compared."""

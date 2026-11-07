@@ -304,7 +304,10 @@ def main():
                for e in data["events"] if e["year"] >= (cur_year or a.target_year)]
     meta = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "target_year": a.target_year, "double_elim_from": pipeline.DOUBLE_ELIM_FROM,
             "synthetic": a.synthetic, "best_rating_model": model_label, "selected_model": selected,
-            "rating_leaderboard": sel["board"], "test_years": test_years, "forecast_backtest": fb,
+            "rating_leaderboard": [{**r, "new": "_seeded" in r["model"] or any("_seeded" in m["model"] for m in r.get("members", []))}
+                                   for r in sel["board"]],
+            "test_years": test_years, "forecast_backtest": fb,
+            "seeded_rating_models": M["seeded"],
             "blend_analog_weight": w, "trend_model_used": M["trend_used"], "sd_model_used": M["sd_used"],
             "beta": beta, "nsims": a.nsims, "warnings": warnings,
             "districts": season["districts"], "rules_note": rules["_comment"],

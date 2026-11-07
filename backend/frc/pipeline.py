@@ -32,6 +32,7 @@ DOUBLE_ELIM_FROM = simulate.DOUBLE_ELIM_FROM   # playoff format the simulator us
 
 
 # A new forecaster replaces the original only if it is better by at least this much on the walk-forward seasons.
+SEEDED_MARGIN = 5e-4     # match log loss (selected seeded vs selected unseeded rating model, on the held-out seasons)
 TREND2_MARGIN = 5e-4     # RMSE, in standard deviations of team strength
 SD2_MARGIN = 5e-3        # log score of the forecast spread (nats per team-season)
 
@@ -65,6 +66,23 @@ def build_forecast(data, target, rules, nsims=400, log=print, use_schedules=True
     test_years = played[-3:]
     log(f"[{target}] trained through {played[-1] if played else None}; model test years {test_years}")
     sel = ratings.select_model(train, test_years, log=log)
+    # NEW: seeded rating models. Seeds = a preseason forecast for every season, each made only from earlier seasons'
+    # ratings (themselves from the unseeded models just selected). The seeded models join the race as SEPARATE
+    # candidates; they drive the forecasts only if the best selection with them beats the unseeded one on the
+    # held-out seasons by SEEDED_MARGIN, but they are listed on the Model page either way.
+    seeded_info = {"used": False}
+    if len(played) > 6:
+        z0 = forecast.zscores(ratings.selected_strengths(sel), sel["counts"])
+        seeds = forecast.preseason_seeds(z0, sel["counts"], data.get("rookie", {}))
+        sel_s = ratings.select_model({**train, "seeds": seeds}, test_years, grid=ratings.GRID_SEEDED, log=log, prior=sel)
+        base_ll = next(r["test_logloss"] for r in sel["board"] if r["selected"])
+        seed_ll = next(r["test_logloss"] for r in sel_s["board"] if r["selected"])
+        seeded_info = {"used": bool(seed_ll < base_ll - SEEDED_MARGIN), "test_logloss_unseeded": base_ll, "test_logloss_seeded": seed_ll}
+        if seeded_info["used"]:
+            sel = sel_s
+        else:
+            sel["board"] = sorted(sel["board"] + [{**r, "selected": False} for r in sel_s["board"] if r["model"].endswith("_seeded")], key=lambda r: r["test_logloss"])
+        log(f"[{target}] seeded rating models: unseeded {base_ll:.4f} vs seeded {seed_ll:.4f} -> {'USED' if seeded_info['used'] else 'not used'}")
     end_strength, counts = ratings.selected_strengths(sel), sel["counts"]
     z = forecast.zscores(end_strength, counts)
     pct = forecast.percentiles(z, counts)
@@ -101,7 +119,7 @@ def build_forecast(data, target, rules, nsims=400, log=print, use_schedules=True
     season = simulate.run_season(sim, target, tevents, data["event_teams"], strengths, rookie, sched, log)
     return {"target": target, "train": train, "played": played, "test_years": test_years, "sel": sel,
             "end_strength": end_strength, "counts": counts, "z": z, "pct": pct, "fb": fb, "blend_w": w, "fc": fc,
-            "trend_used": "trend2" if use_t2 else "trend", "sd_used": "sd2" if use_sd2 else "analog",
+            "trend_used": "trend2" if use_t2 else "trend", "sd_used": "sd2" if use_sd2 else "analog", "seeded": seeded_info,
             "rookie_prior": rk_prior, "beta": beta, "tevents": tevents, "strengths": strengths, "n_prior": n_prior,
             "sched": sched, "season": season}
 

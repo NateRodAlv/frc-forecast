@@ -333,6 +333,101 @@ def _mk(kind):
 MODELS = {"elo": Elo, "elo_plain": PlainElo, "ac_elo": ACElo, "epa": EPA, "bt": BT,
           "pridge": _mk("pridge"), "ropr": _mk("ropr"), "wopr": _mk("wopr"), "lasso": _mk("lasso"), "dpr": _mk("dpr")}
 
+
+# ---------------------------------------------------------------- seeded variants (NEW, separate models)
+class SeedMixin:
+    """NEW. Start each season from a preseason forecast instead of only `carry x last season's rating`.
+    The seeds (forecast.preseason_seeds) come from `data["seeds"]`, handed over by run(); each season's seed is made
+    only from earlier seasons. At the start of a season a team's state is moved `mix` of the way from where the
+    carry-over left it to  mean + sd x z_hat  (mean/sd of last season's ratings over teams with >= 8 matches, so the
+    forecast's z units map back onto the model's own scale). Teams the model has never seen are placed at the
+    average first-season level. With mix = 0 (or no seeds) the model is exactly its base model."""
+    snap_unit = 1.0          # model state units per rating unit (EPA keeps e = rating / 3)
+
+    def _init_seed(self, mix, min_matches=8):
+        self.mix, self.min_m = mix, min_matches
+        self.seed_data = None
+        self._tc, self._stats, self._year, self._known = defaultdict(int), None, None, set()
+
+    def attach(self, data):
+        self.seed_data = data.get("seeds")
+
+    def _snap(self, t):
+        return getattr(self, "season_strength", self.strength)(t)
+
+    def _active(self):
+        return bool(self.seed_data) and self.mix > 0 and self._stats is not None
+
+    def new_season(self):
+        vals = [self._snap(t) for t, c in self._tc.items() if c >= self.min_m]
+        self._stats = (float(np.mean(vals)), float(np.std(vals)) + 1e-9) if len(vals) > 50 else None
+        self._tc.clear()
+        super().new_season()
+
+    def start_event(self, e):
+        if hasattr(super(), "start_event"):
+            super().start_event(e)
+        y = e["year"]
+        if y == self._year:
+            return
+        self._year = y
+        if self._active() and y in self.seed_data["seeds"]:
+            mu, sd = self._stats
+            for t, zh in self.seed_data["seeds"][y].items():
+                if t in self._known:
+                    self._bump(t, self.mix * (mu + sd * zh - self._snap(t)) * self.snap_unit)
+
+    def _ensure(self, t):
+        if t in self._known:
+            return
+        self._known.add(t)
+        sd_ = self.seed_data
+        if self._active() and self._year in sd_["rookie_z"] and t not in sd_["seeds"].get(self._year, {}):
+            mu, sd = self._stats
+            self._bump(t, self.mix * (mu + sd * sd_["rookie_z"][self._year] - self._snap(t)) * self.snap_unit)
+
+    def margin(self, red, blue):
+        for t in red + blue:
+            self._ensure(t)
+        return super().margin(red, blue)
+
+    def update(self, red, blue, rs, bs):
+        for t in red + blue:
+            self._tc[t] += 1
+        super().update(red, blue, rs, bs)
+
+
+def _seeded_reg(kind):
+    base = MODELS[kind]
+
+    class Seeded(SeedMixin, base):
+        name = kind + "_seeded"
+
+        def __init__(self, mix=1.0, **kw):
+            base.__init__(self, **kw)
+            self._init_seed(mix)
+
+        def _bump(self, t, d):
+            self.off[t] += d
+    Seeded.__name__ = f"Seeded_{kind}"
+    return Seeded
+
+
+class SeededEPA(SeedMixin, EPA):
+    name = "epa_seeded"
+    snap_unit = 1.0 / 3.0
+
+    def __init__(self, mix=1.0, **kw):
+        EPA.__init__(self, **kw)
+        self._init_seed(mix)
+
+    def _bump(self, t, d):
+        self.e[t] += d
+
+
+SEEDED = {"pridge_seeded": _seeded_reg("pridge"), "dpr_seeded": _seeded_reg("dpr"), "epa_seeded": SeededEPA}
+MODELS.update(SEEDED)
+
 # Hyperparameters were tuned by random search + local refinement on seasons 2016-2023 (mean per-year log loss),
 # then checked on 2024-2026, which the search never saw. The tuned points come first; a few of the original
 # points stay so model selection can still fall back to them if the data changes character. Notable shifts:
@@ -357,10 +452,26 @@ GRID = {
 }
 
 
+# Seeded variants (NEW). Two points each: the base model's tuned hyper-parameters with full seeding (mix 1), and a point
+# found by random search + local refinement on seasons < 2024 only (2024-26 never seen). Held-out check: the searched
+# point beat the unsearched one on the search seasons but NOT on 2024-26 (the gain is the seeding itself), so both stay
+# in the race and model selection picks by training-season log loss as for every other model.
+GRID_SEEDED = {
+    "pridge_seeded": [{"lam": 3.92, "carry": 0.721, "eta": 0.974, "decay": 0.991, "every": 2, "mix": 0.906},
+                      {"lam": 2.8, "carry": 0.86, "eta": 0.92, "decay": 0.987, "every": 4, "mix": 1.0}],
+    "dpr_seeded": [{"lam": 6.32, "carry": 0.467, "eta": 0.908, "decay": 0.994, "mix": 0.87},
+                   {"lam": 5.8, "carry": 0.65, "eta": 0.835, "decay": 1.0, "mix": 1.0}],
+    "epa_seeded": [{"carry": 0.243, "lr0": 1.49, "lr_min": 0.155, "prior_n": 4.15, "mix": 0.786},
+                   {"carry": 0.46, "lr0": 1.47, "lr_min": 0.18, "prior_n": 2.9, "mix": 1.0}],
+}
+
+
 def run(model, data, years=None, offseason=False, on_match=None):
     """One chronological pass (each match is predicted BEFORE the model sees its result).
     Returns (metrics per year, end-of-season strengths per year). Per-team match counts per year are left on
     model.season_counts so ratings can be normalised over teams with enough matches."""
+    if hasattr(model, "attach"):
+        model.attach(data)
     ymean = year_mean_scores(data)
     res = defaultdict(lambda: {"ll": 0.0, "br": 0.0, "ok": 0, "n": 0})
     cur, cur_ev, end_strength = None, None, {}
@@ -452,13 +563,20 @@ def _logit(p):
     return np.log(p / (1 - p))
 
 
-def select_model(data, test_years, grid=None, n_members=3, log=None):
+def select_model(data, test_years, grid=None, n_members=4, log=None, prior=None):
     """Evaluate every candidate, then try a stacked ensemble of the best few (weights >= 0, fit on the training
     seasons only). The ensemble is used ONLY if it beats the best single model on the held-out seasons.
+    `prior` (an earlier select_model result on the same seasons) keeps its single models in the race, so a second
+    call can add new candidates (the seeded models) without re-running the others.
     Returns dict(board, selected, ends, counts, preds)."""
     from scipy.optimize import minimize
     board, best, params, aux = backtest(data, test_years, grid, return_all=True, log=log)
     preds, ends, counts = aux["preds"], aux["ends"], aux["counts"]
+    if prior:
+        board = [dict(r) for r in prior["board"] if not r["model"].startswith("ensemble")] + board   # copies: the flags below must not touch `prior`
+        board.sort(key=lambda r: r["test_logloss"])
+        best, params = board[0]["model"], board[0]["params"]
+        preds, ends = {**prior["preds"], **preds}, {**prior["ends"], **ends}
     all_years = sorted({e["year"] for e in data["events"]})
     train_years = {y for y in all_years if y < min(test_years)}
     keys, yrs, out = [], [], []

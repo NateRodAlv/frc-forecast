@@ -65,6 +65,9 @@ original stays selectable. A NEW model only drives the forecasts when it beats t
 |---|---|---|---|
 | **Trend v2** (`forecast.Trend2`) | Trend model | The boosted-tree half also sees how many matches last season's rating rests on, the team's long-run mean, its best/worst recent seasons, a 3-season change and the number of seasons seen. | RMSE 0.6393 vs 0.6420 (2023-26), 0.7471 vs 0.7511 (2013-19) |
 | **Variance model v2** (`forecast.SdModel`) | Spread of analog teams | Predicts each team's squared forecast error (out-of-fold) from its features and the season, so it follows the era. The analog spread was ~15% too wide in 2023-26 (a nominal 80% range covered 87%), which flattens simulated win odds. | log score 0.923 vs 0.954 (2023-26), 1.108 vs 1.131 (2013-19); 80% range covers 85% vs 87% |
+| **Seeded rating models** (`ratings.SEEDED`: `pridge_seeded`, `dpr_seeded`, `epa_seeded`) | pRidge, dRidge, EPA | Start every season from a preseason forecast (made only from earlier seasons) instead of only `carry x last rating`. | In-season match log loss 0.4555 -> 0.4505 on held-out 2024-26 (accuracy 78.4% -> 78.7%), biggest early in events. Preseason forecasts and event odds unchanged. |
+
+Full tuning log (values, before/after accuracies, what was tried and left alone): [TUNING.md](TUNING.md).
 
 Caveats: these numbers were measured offline on a history rebuilt from the site's `teams.json` export, which only contains teams
 active since 2024 (so defunct teams are missing and absolute RMSEs run ~0.006 above the live backtest). Only the *relative* comparison is

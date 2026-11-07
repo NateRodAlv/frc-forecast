@@ -125,6 +125,62 @@ def test_new_forecasters_in_predict_next_and_no_lookahead():
     assert np.allclose(forecast.features_v2(t, ser, 4, counts), forecast.features_v2(t, ser, 4, c2))
 
 
+def test_seeds_use_only_earlier_seasons():
+    d, z, counts = _synthetic_history()
+    rk = d["rookie"]
+    a = forecast.preseason_seeds(z, counts, rk)
+    ys = sorted(a["seeds"])
+    assert ys and ys[0] >= min(z) + 5 and all(set(a["seeds"][y]) for y in ys)
+    y = ys[-1]
+    z2 = {k: dict(v) for k, v in z.items()}
+    z2[y] = {t: v + 3.0 for t, v in z2[y].items()}          # the season being seeded: must not matter
+    b = forecast.preseason_seeds(z2, counts, rk)
+    assert all(abs(a["seeds"][y][t] - b["seeds"][y][t]) < 1e-12 for t in a["seeds"][y])
+    assert a["rookie_z"][y] == b["rookie_z"][y]
+    z3 = {k: dict(v) for k, v in z.items()}
+    z3[y - 1] = {t: v + 3.0 for t, v in z3[y - 1].items()}  # the season before it: must matter
+    c = forecast.preseason_seeds(z3, counts, rk)
+    assert any(abs(a["seeds"][y][t] - c["seeds"][y][t]) > 1e-6 for t in a["seeds"][y])
+
+
+def test_seeded_rating_models_are_separate_exact_at_mix0_and_run_with_seeds():
+    d, z, counts = _synthetic_history()
+    seeds = forecast.preseason_seeds(z, counts, d["rookie"])
+    sd = {**d, "seeds": seeds}
+    assert {"pridge_seeded", "dpr_seeded", "epa_seeded"} <= set(ratings.MODELS) and set(ratings.GRID_SEEDED) <= set(ratings.MODELS)
+    cases = {"epa_seeded": ("epa", {"carry": 0.5, "lr0": 1.0, "lr_min": 0.1, "prior_n": 3.0}),
+             "pridge_seeded": ("pridge", {"lam": 3.0, "carry": 0.8, "eta": 0.95, "decay": 0.99, "every": 4}),
+             "dpr_seeded": ("dpr", {"lam": 5.0, "carry": 0.65, "eta": 0.9, "decay": 1.0})}
+    for name, (base, params) in cases.items():
+        m0, _ = ratings.run(ratings.MODELS[base](**params), d)
+        mz, _ = ratings.run(ratings.MODELS[name](mix=0.0, **params), sd)          # mix 0 == base model, bit for bit
+        assert all(abs(m0[y]["logloss"] - mz[y]["logloss"]) < 1e-12 for y in m0)
+        mn, _ = ratings.run(ratings.MODELS[name](mix=1.0, **params), d)           # no seeds supplied == base model too
+        assert all(abs(m0[y]["logloss"] - mn[y]["logloss"]) < 1e-12 for y in m0)
+        m1, _ = ratings.run(ratings.MODELS[name](mix=1.0, **params), sd)
+        ys = [y for y in m1 if y in seeds["seeds"]]
+        assert ys and any(abs(m0[y]["logloss"] - m1[y]["logloss"]) > 1e-6 for y in ys)      # genuinely different
+        a0, a1 = np.mean([m0[y]["logloss"] for y in ys]), np.mean([m1[y]["logloss"] for y in ys])
+        assert a1 < a0 + 0.02                                                           # and not broken
+    # the original models are untouched by the new ones being registered
+    assert ratings.MODELS["pridge"] is not ratings.MODELS["pridge_seeded"] and "seeds" not in ratings.GRID
+
+
+def test_second_stage_selection_leaves_the_first_stage_untouched():
+    d, z, counts = _synthetic_history()
+    seeds = forecast.preseason_seeds(z, counts, d["rookie"])
+    yrs = [2023, 2024, 2025]
+    g1 = {"epa": [{"carry": 0.5, "lr0": 1.0, "lr_min": 0.1, "prior_n": 3.0}], "elo": [{"k": 40, "carry": 0.75}]}
+    g2 = {"epa_seeded": [{"carry": 0.5, "lr0": 1.0, "lr_min": 0.1, "prior_n": 3.0, "mix": 1.0}]}
+    s1 = ratings.select_model(d, yrs, grid=g1)
+    flags = [(r["model"], r["selected"]) for r in s1["board"]]
+    assert sum(f for _, f in flags) == 1
+    s2 = ratings.select_model({**d, "seeds": seeds}, yrs, grid=g2, prior=s1)
+    assert [(r["model"], r["selected"]) for r in s1["board"]] == flags               # stage one unchanged
+    assert sum(r["selected"] for r in s2["board"]) >= 1 and any(r["model"] == "epa_seeded" for r in s2["board"])
+    assert {"epa", "elo", "epa_seeded"} <= set(s2["preds"])
+
+
 def test_tba_parsing_with_schema_shaped_fixtures(monkeypatch, tmp_path):
     from frc import tba as tbamod
     monkeypatch.setattr(tbamod, "CACHE", tmp_path)
